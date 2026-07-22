@@ -3,10 +3,11 @@ import pandas as pd
 import folium
 from streamlit_folium import st_folium
 
-from src.data_loader import load_tiendas, load_visitas, reload_all
+from src.data_loader import load_tiendas, load_visitas, reload_all, DATE_COLUMN_STD
 from src.matching import build_match_table
 from src.maps_utils import get_coordinates
 from src.photos_utils import parse_photo_urls
+from src.estado_subido import obtener_subidos, marcar_subido, desmarcar_subido
 
 st.set_page_config(
     page_title="Puntos evaluados vs. tiendas vigentes",
@@ -45,7 +46,7 @@ with st.sidebar:
 # ------------------------------------------------------------------ Data --
 try:
     tiendas = load_tiendas()
-    visitas = load_visitas()
+    visitas_full = load_visitas()
 except FileNotFoundError as e:
     st.error(
         "No encuentro los archivos de datos. Verifica que "
@@ -54,11 +55,63 @@ except FileNotFoundError as e:
     )
     st.stop()
 
-if visitas.empty:
+if visitas_full.empty:
     st.warning("La hoja 'Visitas_Operaciones' no tiene puntos para analizar.")
     st.stop()
 
+subidos_ids = obtener_subidos()
+
+# --------------------------------------------- Filtros nuevos (sidebar) ---
+with st.sidebar:
+    st.divider()
+    st.subheader("📅 Filtro por fecha")
+
+    tiene_fechas = visitas_full[DATE_COLUMN_STD].notna().any()
+    rango_fecha = None
+    if tiene_fechas:
+        fecha_min = visitas_full[DATE_COLUMN_STD].min().date()
+        fecha_max = visitas_full[DATE_COLUMN_STD].max().date()
+        rango_fecha = st.date_input(
+            "Ver puntos evaluados entre estas fechas",
+            value=(fecha_min, fecha_max),
+            min_value=fecha_min,
+            max_value=fecha_max,
+        )
+    else:
+        st.caption(
+            "No se detectó una columna de fecha en 'Visitas_Operaciones' "
+            "(busco alguna columna cuyo nombre contenga 'fecha')."
+        )
+
+    st.divider()
+    mostrar_subidos = st.checkbox(
+        "Mostrar también los puntos ya marcados como 'Subido'",
+        value=False,
+    )
+
+# ---------------------------------------------------- Aplicar filtros -----
+visitas = visitas_full.copy()
+
+n_sin_fecha_excluidos = 0
+if rango_fecha and isinstance(rango_fecha, tuple) and len(rango_fecha) == 2:
+    inicio, fin = rango_fecha
+    con_fecha = visitas[DATE_COLUMN_STD].notna()
+    en_rango = (visitas[DATE_COLUMN_STD].dt.date >= inicio) & (visitas[DATE_COLUMN_STD].dt.date <= fin)
+    n_sin_fecha_excluidos = int((~con_fecha).sum())
+    visitas = visitas[con_fecha & en_rango]
+
+n_subidos_ocultos = 0
+if not mostrar_subidos:
+    n_subidos_ocultos = int(visitas["ID"].isin(subidos_ids).sum())
+    visitas = visitas[~visitas["ID"].isin(subidos_ids)]
+
+if visitas.empty:
+    st.warning("No hay puntos evaluados que cumplan con los filtros seleccionados.")
+    st.stop()
+
 match_table = build_match_table(visitas, tiendas, threshold=threshold, top_n=top_n)
+match_table["ID"] = match_table["ID"].astype(str)
+match_table["Subido"] = match_table["ID"].isin(subidos_ids)
 
 # ============================================================== PAGE 1 ====
 if page == "🔍 Comparación de nombres":
@@ -67,6 +120,16 @@ if page == "🔍 Comparación de nombres":
         f"{len(visitas)} puntos evaluados · {len(tiendas)} tiendas "
         "ABIERTA / OBRA / FIRMADA en la base."
     )
+    if n_sin_fecha_excluidos:
+        st.caption(
+            f"⚠️ {n_sin_fecha_excluidos} punto(s) sin fecha registrada se "
+            "excluyeron por el filtro de fecha."
+        )
+    if n_subidos_ocultos:
+        st.caption(
+            f"👁️ {n_subidos_ocultos} punto(s) ya marcados como 'Subido' "
+            "están ocultos (activa la casilla en la barra lateral para verlos)."
+        )
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Puntos evaluados", len(match_table))
@@ -89,7 +152,7 @@ if page == "🔍 Comparación de nombres":
     cols_mostrar = [
         "ID", "Nombre del Punto", "Jefe de zona", "Región", "Plaza",
         "Estado visita", "Mejor coincidencia", "Estado tienda", "Score",
-        "Posible duplicado",
+        "Posible duplicado", "Subido",
     ]
     st.dataframe(
         tabla[cols_mostrar].style.apply(resaltar, axis=1),
@@ -101,8 +164,8 @@ if page == "🔍 Comparación de nombres":
     st.caption(
         "El **Score** va de 0 a 100 (similitud de texto entre nombres, "
         "algoritmo WRatio). Ajusta el umbral en la barra lateral. Para ver "
-        "el detalle completo de un punto (fotos, contacto, mapa), ve a la "
-        "pestaña **Detalle por punto**."
+        "el detalle completo de un punto (fotos, contacto, mapa) y marcarlo "
+        "como **Subido**, ve a la pestaña **Detalle por punto**."
     )
 
 # ============================================================== PAGE 2 ====
@@ -110,10 +173,32 @@ else:
     st.title("Detalle del punto evaluado")
 
     nombres = match_table["Nombre del Punto"].tolist()
+    if not nombres:
+        st.info("No hay puntos que cumplan con los filtros seleccionados.")
+        st.stop()
+
     seleccion = st.selectbox("Selecciona un punto evaluado", nombres)
 
     fila_match = match_table[match_table["Nombre del Punto"] == seleccion].iloc[0]
     fila_visita = visitas[visitas["Nombre del Punto"] == seleccion].iloc[0]
+    id_punto = str(fila_visita.get("ID", ""))
+    ya_subido = id_punto in subidos_ids
+
+    col_estado, col_boton = st.columns([3, 1])
+    with col_estado:
+        if ya_subido:
+            st.success("✅ Este punto ya está marcado como **Subido**.")
+        else:
+            st.info("Este punto todavía no se ha marcado como Subido.")
+    with col_boton:
+        if ya_subido:
+            if st.button("↩️ Desmarcar", use_container_width=True):
+                desmarcar_subido(id_punto)
+                st.rerun()
+        else:
+            if st.button("📤 Marcar como Subido", use_container_width=True):
+                marcar_subido(id_punto)
+                st.rerun()
 
     if fila_match["Posible duplicado"]:
         st.error(
@@ -137,6 +222,9 @@ else:
         st.markdown(f"**Contacto propietario (correo):** {fila_visita.get('Contacto del Propietario (Correo Electronico)', '')}")
         st.markdown(f"**Estado visita:** {fila_visita.get('Estado', '')}")
         st.markdown(f"**Estado Growth:** {fila_visita.get('Estado Growth', '')}")
+        fecha_val = fila_visita.get(DATE_COLUMN_STD)
+        if pd.notna(fecha_val):
+            st.markdown(f"**Fecha:** {fecha_val.strftime('%Y-%m-%d')}")
         if pd.notna(fila_visita.get("Comentarios")):
             st.markdown(f"**Comentarios:** {fila_visita.get('Comentarios', '')}")
 
