@@ -28,6 +28,14 @@ VISITAS_RENAME = {
     " RENTA UM": "RENTA UM",
 }
 
+# Nombre de columna "estándar" que usa el resto de la app (el filtro por
+# fecha en app.py). Se llena automáticamente detectando alguna columna del
+# Excel cuyo nombre contenga "fecha" (ver _find_date_column). Si tu hoja
+# usa un nombre muy distinto (que no contenga la palabra "fecha"), agrégalo
+# a DATE_COLUMN_HINTS.
+DATE_COLUMN_STD = "Fecha"
+DATE_COLUMN_HINTS = ["fecha de visita", "fecha visita", "fecha de la visita", "fecha"]
+
 
 def _file_signature(path: str):
     """mtime + size, se usa como parte de la cache key para invalidar el
@@ -36,12 +44,25 @@ def _file_signature(path: str):
     return (path, stat.st_mtime, stat.st_size)
 
 
+def _find_date_column(df: pd.DataFrame):
+    """Busca la columna de fecha en 'Visitas_Operaciones'. Prueba primero
+    los nombres exactos en DATE_COLUMN_HINTS (en orden) y, si no encuentra
+    ninguno, cualquier columna cuyo nombre contenga la palabra 'fecha'."""
+    cols_lower = {c.lower().strip(): c for c in df.columns if isinstance(c, str)}
+    for hint in DATE_COLUMN_HINTS:
+        if hint in cols_lower:
+            return cols_lower[hint]
+    for lower, original in cols_lower.items():
+        if "fecha" in lower:
+            return original
+    return None
+
+
 @st.cache_data(show_spinner="Cargando tiendas vigentes...")
 def load_tiendas(_sig=None) -> pd.DataFrame:
     sig = _file_signature(BOOK_PATH)
     df = pd.read_excel(BOOK_PATH, sheet_name="JUN")
     df.columns = [str(c).strip() for c in df.columns]
-
     keep = [c for c in TIENDAS_COLS if c in df.columns]
     df = df[keep].copy()
 
@@ -72,6 +93,25 @@ def load_visitas(_sig=None) -> pd.DataFrame:
     if "Nombre del Punto" in df.columns:
         df["Nombre del Punto"] = df["Nombre del Punto"].astype(str).str.strip()
         df = df[df["Nombre del Punto"].ne("") & df["Nombre del Punto"].ne("nan")]
+
+    # --- Columna estándar de fecha, usada por el filtro de fecha en la UI.
+    fecha_col = _find_date_column(df)
+    if fecha_col is not None:
+        df[DATE_COLUMN_STD] = pd.to_datetime(df[fecha_col], errors="coerce")
+    else:
+        # No se encontró ninguna columna de fecha: se deja vacía y app.py
+        # ocultará el filtro automáticamente con un aviso.
+        df[DATE_COLUMN_STD] = pd.NaT
+
+    # --- Columna ID, usada para marcar puntos como "Subido". Si ya existe
+    # en el Excel se normaliza a texto; si no existe, se usa el nombre del
+    # punto como identificador de respaldo.
+    if "ID" in df.columns:
+        df["ID"] = df["ID"].astype(str)
+    elif "Nombre del Punto" in df.columns:
+        df["ID"] = df["Nombre del Punto"]
+    else:
+        df["ID"] = df.index.astype(str)
 
     df = df.reset_index(drop=True)
     return df
