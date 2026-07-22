@@ -1,7 +1,7 @@
 """
 Genera un informe PDF de un punto evaluado (base de Operaciones):
-datos principales, nombre original vs. nombre nuevo propuesto, fotos del
-local y (opcionalmente) las coincidencias de nombre/radio encontradas.
+datos principales, nombre original vs. nombre nuevo propuesto, ubicación
+(link de Maps + coordenadas) y fotos del local.
 
 Uso típico desde app.py:
 
@@ -12,7 +12,8 @@ Uso típico desde app.py:
         nombre_original=seleccion,
         nombre_nuevo=nuevo_nombre_input,
         fotos=fotos,
-        coincidencias=fila_match["Todas las coincidencias"],
+        lat=lat,
+        lon=lon,
     )
     st.download_button("Descargar informe PDF", pdf_bytes,
                         file_name=f"informe_{id_punto}.pdf",
@@ -73,7 +74,8 @@ def generar_informe_pdf(
     nombre_original: str,
     fotos: Optional[list[str]] = None,
     nombre_nuevo: Optional[str] = None,
-    coincidencias: Optional[list[dict]] = None,
+    lat: Optional[float] = None,
+    lon: Optional[float] = None,
 ) -> bytes:
     """
     Construye el informe en memoria y devuelve los bytes del PDF, listos
@@ -165,33 +167,31 @@ def generar_informe_pdf(
         story.append(tabla_datos)
     story.append(Spacer(1, 10))
 
-    # ---- Coincidencias (nombre y/o radio) ------------------------------
-    if coincidencias:
-        story.append(Paragraph("Coincidencias encontradas", subtitulo_style))
-        encabezado = ["Tienda / Punto", "Estado", "Score / Distancia"]
-        filas_coinc = [encabezado]
-        for c in coincidencias:
-            nombre_c = c.get("tienda_name") or c.get("NAME") or c.get("Nombre PP") or "-"
-            estado_c = c.get("estado") or c.get("ESTADO") or c.get("Estado") or "-"
-            if "distancia_m" in c:
-                metrica = f"{c['distancia_m']:.0f} m"
-            else:
-                metrica = f"{c.get('score', '-')}%"
-            filas_coinc.append([str(nombre_c), str(estado_c), metrica])
+    # ---- Ubicación: link de Maps + coordenadas -------------------------
+    maps_link = (datos.get("Enlace de la ubicación en Google Maps") or "").strip() \
+        if isinstance(datos.get("Enlace de la ubicación en Google Maps"), str) else ""
+    tiene_coords = lat is not None and lon is not None and not pd.isna(lat) and not pd.isna(lon)
 
-        tabla_coinc = Table(filas_coinc, colWidths=[7 * cm, 4.5 * cm, 4 * cm])
-        tabla_coinc.setStyle(
+    if maps_link or tiene_coords:
+        story.append(Paragraph("Ubicación", subtitulo_style))
+        filas_ubi = []
+        if tiene_coords:
+            filas_ubi.append(["Coordenadas", f"{lat:.3f}, {lon:.3f}"])
+        if maps_link:
+            filas_ubi.append(["Link de Maps", maps_link])
+        tabla_ubi = Table(filas_ubi, colWidths=[5 * cm, 10.5 * cm])
+        tabla_ubi.setStyle(
             TableStyle(
                 [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#343a40")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f0f0f0")),
+                    ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
                     ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
                     ("FONTSIZE", (0, 0), (-1, -1), 9),
                 ]
             )
         )
-        story.append(tabla_coinc)
+        story.append(tabla_ubi)
         story.append(Spacer(1, 10))
 
     # ---- Fotos ----------------------------------------------------------
