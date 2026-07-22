@@ -8,6 +8,9 @@ from src.matching import build_match_table
 from src.maps_utils import get_coordinates
 from src.photos_utils import parse_photo_urls
 from src.estado_subido import obtener_subidos, marcar_subido, desmarcar_subido
+from src.geo_utils import buscar_cercanos
+from src.puntos_potenciales import load_puntos_potenciales, buscar_puntos_potenciales_cercanos
+from src.pdf_report import generar_informe_pdf
 
 st.set_page_config(
     page_title="Puntos evaluados vs. tiendas vigentes",
@@ -21,12 +24,14 @@ with st.sidebar:
 
     if st.button("🔄 Recargar datos (Excel del repo)", use_container_width=True):
         reload_all()
+        load_puntos_potenciales.clear()
         st.rerun()
 
     st.caption(
-        "Los datos se leen de `data/Book.xlsx` y "
-        "`data/Operaciones_ult_semana.xlsm`. Para actualizarlos, reemplaza "
-        "esos archivos en el repositorio de GitHub y presiona Recargar."
+        "Los datos se leen de `data/Book.xlsx`, "
+        "`data/Operaciones_ult_semana.xlsm` y `data/Puntos_Potenciales.xlsx`. "
+        "Para actualizarlos, reemplaza esos archivos en el repositorio de "
+        "GitHub y presiona Recargar."
     )
 
     st.divider()
@@ -35,6 +40,12 @@ with st.sidebar:
         min_value=50, max_value=100, value=80, step=1,
     )
     top_n = st.slider("Coincidencias a mostrar por punto", 1, 5, 3)
+
+    st.divider()
+    radio_cercania_m = st.slider(
+        "Radio de cercanía (metros) para tiendas abiertas / puntos potenciales",
+        min_value=50, max_value=1000, value=300, step=25,
+    )
 
     st.divider()
     page = st.radio(
@@ -54,6 +65,8 @@ except FileNotFoundError as e:
         f"estén en el repo.\n\nDetalle: {e}"
     )
     st.stop()
+
+puntos_potenciales = load_puntos_potenciales()
 
 if visitas_full.empty:
     st.warning("La hoja 'Visitas_Operaciones' no tiene puntos para analizar.")
@@ -88,6 +101,13 @@ with st.sidebar:
         "Mostrar también los puntos ya marcados como 'Subido'",
         value=False,
     )
+
+    if puntos_potenciales.empty:
+        st.caption(
+            "⚠️ No encontré `data/Puntos_Potenciales.xlsx` (o la hoja "
+            "'MS26' vino vacía). Súbelo al repo para activar la búsqueda "
+            "de puntos potenciales cercanos."
+        )
 
 # ---------------------------------------------------- Aplicar filtros -----
 visitas = visitas_full.copy()
@@ -164,8 +184,8 @@ if page == "🔍 Comparación de nombres":
     st.caption(
         "El **Score** va de 0 a 100 (similitud de texto entre nombres, "
         "algoritmo WRatio). Ajusta el umbral en la barra lateral. Para ver "
-        "el detalle completo de un punto (fotos, contacto, mapa) y marcarlo "
-        "como **Subido**, ve a la pestaña **Detalle por punto**."
+        "el detalle completo de un punto (fotos, contacto, mapa, cercanía "
+        "y descargar el informe en PDF) ve a la pestaña **Detalle por punto**."
     )
 
 # ============================================================== PAGE 2 ====
@@ -207,6 +227,16 @@ else:
             f"({fila_match['Estado tienda']})."
         )
 
+    # -------------------------------------------- Nombre nuevo propuesto --
+    st.subheader("✏️ Renombrar (opcional)")
+    nuevo_nombre = st.text_input(
+        "Si vas a subir este punto con otro nombre, escríbelo aquí. "
+        "El informe en PDF imprimirá el nombre original y este nombre nuevo.",
+        value="",
+        placeholder=f"Nombre actual: {seleccion}",
+        key=f"nuevo_nombre_{id_punto}",
+    )
+
     col_info, col_foto = st.columns([1.1, 1])
 
     with col_info:
@@ -247,6 +277,9 @@ else:
     direccion = fila_visita.get("Dirección", "")
     lat, lon, fuente = get_coordinates(maps_link, direccion)
 
+    tiendas_cercanas = pd.DataFrame()
+    puntos_potenciales_cercanos = pd.DataFrame()
+
     if lat is not None:
         st.caption(f"Coordenadas obtenidas — {fuente} · lat: {lat:.6f}, lon: {lon:.6f}")
 
@@ -271,9 +304,62 @@ else:
                     ),
                 ).add_to(m)
 
+        # -------------------------------------- Búsqueda por radio (300 m) --
+        # `tiendas` (load_tiendas) ya viene filtrada a ABIERTA/OBRA/FIRMADA;
+        # aquí nos quedamos solo con ABIERTA, que es lo que pediste.
+        tiendas_abiertas = tiendas[tiendas["ESTADO"] == "ABIERTA"]
+        tiendas_cercanas = buscar_cercanos(
+            lat, lon, tiendas_abiertas, lat_col="lat", lon_col="lon", radio_m=radio_cercania_m
+        )
+        for _, t in tiendas_cercanas.iterrows():
+            folium.Marker(
+                [t["lat"], t["lon"]],
+                tooltip=f"🟠 A {t['distancia_m']:.0f} m — {t.get('NAME', '')}",
+                icon=folium.Icon(color="orange", icon="shopping-cart"),
+            ).add_to(m)
+
+        if not puntos_potenciales.empty:
+            puntos_potenciales_cercanos = buscar_puntos_potenciales_cercanos(
+                lat, lon, radio_m=radio_cercania_m, df_pp=puntos_potenciales
+            )
+            for _, p in puntos_potenciales_cercanos.iterrows():
+                folium.Marker(
+                    [p["lat"], p["lon"]],
+                    tooltip=f"🟣 A {p['distancia_m']:.0f} m — {p.get('Nombre PP', '')} (Puntos Potenciales)",
+                    icon=folium.Icon(color="purple", icon="flag"),
+                ).add_to(m)
+
         st_folium(m, use_container_width=True, height=450, returned_objects=[])
     else:
         st.warning(f"No se pudo ubicar el punto en el mapa. Motivo: {fuente}")
+
+    # ------------------------------------- Resultados de cercanía (texto) --
+    st.divider()
+    st.subheader(f"📡 Cercanía en un radio de {radio_cercania_m} m")
+
+    col_c1, col_c2 = st.columns(2)
+    with col_c1:
+        st.markdown("**Tiendas abiertas cerca**")
+        if not tiendas_cercanas.empty:
+            cols_tienda = [c for c in ["NAME", "ESTADO", "PLAZA 2026", "MUNICIPIO", "distancia_m"] if c in tiendas_cercanas.columns]
+            st.dataframe(
+                tiendas_cercanas[cols_tienda].rename(columns={
+                    "NAME": "Tienda", "ESTADO": "Estado",
+                    "PLAZA 2026": "Plaza 2026", "MUNICIPIO": "Municipio",
+                    "distancia_m": "Distancia (m)",
+                }),
+                hide_index=True, use_container_width=True,
+            )
+        else:
+            st.caption("Ninguna tienda ABIERTA dentro del radio.")
+
+    with col_c2:
+        st.markdown("**Puntos Potenciales (microsaturación) cerca**")
+        if not puntos_potenciales_cercanos.empty:
+            cols_pp = [c for c in ["Nombre PP", "Estado", "Region", "UPZ", "Fecha recepción", "distancia_m"] if c in puntos_potenciales_cercanos.columns]
+            st.dataframe(puntos_potenciales_cercanos[cols_pp], hide_index=True, use_container_width=True)
+        else:
+            st.caption("Este punto no aparece antes en la base de Puntos Potenciales.")
 
     st.divider()
     st.subheader("Coincidencias de nombre encontradas")
@@ -290,3 +376,28 @@ else:
         )
     else:
         st.info("No se encontraron tiendas con nombre parecido.")
+
+    # -------------------------------------------------- Descargar informe --
+    st.divider()
+    st.subheader("📄 Informe del punto")
+
+    coincidencias_pdf = list(fila_match["Todas las coincidencias"]) if fila_match["Todas las coincidencias"] else []
+    if not tiendas_cercanas.empty:
+        coincidencias_pdf += tiendas_cercanas.to_dict("records")
+    if not puntos_potenciales_cercanos.empty:
+        coincidencias_pdf += puntos_potenciales_cercanos.to_dict("records")
+
+    pdf_bytes = generar_informe_pdf(
+        datos=fila_visita.to_dict(),
+        nombre_original=seleccion,
+        nombre_nuevo=nuevo_nombre,
+        fotos=fotos,
+        coincidencias=coincidencias_pdf,
+    )
+    st.download_button(
+        "⬇️ Descargar informe en PDF",
+        data=pdf_bytes,
+        file_name=f"informe_punto_{id_punto or seleccion}.pdf",
+        mime="application/pdf",
+        use_container_width=True,
+    )
