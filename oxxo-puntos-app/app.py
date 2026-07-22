@@ -283,26 +283,15 @@ else:
     if lat is not None:
         st.caption(f"Coordenadas obtenidas — {fuente} · lat: {lat:.6f}, lon: {lon:.6f}")
 
-        m = folium.Map(location=[lat, lon], zoom_start=15)
+        m = folium.Map(location=[lat, lon], zoom_start=16)
+
+        # Punto evaluado (el que estás revisando)
         folium.Marker(
             [lat, lon],
-            tooltip=seleccion,
+            tooltip=folium.Tooltip(seleccion, permanent=True, direction="top"),
             popup=seleccion,
             icon=folium.Icon(color="blue", icon="star"),
         ).add_to(m)
-
-        # Muestra también las tiendas vigentes coincidentes cerca, para
-        # comparar visualmente si de verdad es el mismo punto.
-        for coincidencia in fila_match["Todas las coincidencias"]:
-            if pd.notna(coincidencia.get("lat")) and pd.notna(coincidencia.get("lon")):
-                folium.Marker(
-                    [coincidencia["lat"], coincidencia["lon"]],
-                    tooltip=f"{coincidencia['tienda_name']} ({coincidencia['estado']}) · {coincidencia['score']}%",
-                    icon=folium.Icon(
-                        color="red" if coincidencia["score"] >= threshold else "gray",
-                        icon="shopping-cart",
-                    ),
-                ).add_to(m)
 
         # -------------------------------------- Búsqueda por radio (300 m) --
         # `tiendas` (load_tiendas) ya viene filtrada a ABIERTA/OBRA/FIRMADA;
@@ -314,7 +303,7 @@ else:
         for _, t in tiendas_cercanas.iterrows():
             folium.Marker(
                 [t["lat"], t["lon"]],
-                tooltip=f"🟠 A {t['distancia_m']:.0f} m — {t.get('NAME', '')}",
+                tooltip=folium.Tooltip(str(t.get("NAME", "")), permanent=True, direction="right"),
                 icon=folium.Icon(color="orange", icon="shopping-cart"),
             ).add_to(m)
 
@@ -325,10 +314,11 @@ else:
             for _, p in puntos_potenciales_cercanos.iterrows():
                 folium.Marker(
                     [p["lat"], p["lon"]],
-                    tooltip=f"🟣 A {p['distancia_m']:.0f} m — {p.get('Nombre PP', '')} (Puntos Potenciales)",
+                    tooltip=folium.Tooltip(str(p.get("Nombre PP", "")), permanent=True, direction="left"),
                     icon=folium.Icon(color="purple", icon="flag"),
                 ).add_to(m)
 
+        st.caption("🔵 Punto evaluado · 🟠 Tiendas abiertas (Book) · 🟣 Puntos potenciales")
         st_folium(m, use_container_width=True, height=450, returned_objects=[])
     else:
         st.warning(f"No se pudo ubicar el punto en el mapa. Motivo: {fuente}")
@@ -336,33 +326,37 @@ else:
     # ------------------------------------- Resultados de cercanía (texto) --
     st.divider()
     st.subheader(f"📡 Cercanía en un radio de {radio_cercania_m} m")
+    st.caption(
+        "Esto es solo por distancia (no por parecido de nombre): tiendas ya "
+        "ABIERTAS y puntos que ya se habían presentado antes como "
+        "microsaturación (Puntos Potenciales), sin importar cómo se llamen."
+    )
 
-    col_c1, col_c2 = st.columns(2)
-    with col_c1:
-        st.markdown("**Tiendas abiertas cerca**")
-        if not tiendas_cercanas.empty:
-            cols_tienda = [c for c in ["NAME", "ESTADO", "PLAZA 2026", "MUNICIPIO", "distancia_m"] if c in tiendas_cercanas.columns]
-            st.dataframe(
-                tiendas_cercanas[cols_tienda].rename(columns={
-                    "NAME": "Tienda", "ESTADO": "Estado",
-                    "PLAZA 2026": "Plaza 2026", "MUNICIPIO": "Municipio",
-                    "distancia_m": "Distancia (m)",
-                }),
-                hide_index=True, use_container_width=True,
-            )
-        else:
-            st.caption("Ninguna tienda ABIERTA dentro del radio.")
+    filas_cercania = []
+    for _, t in tiendas_cercanas.iterrows():
+        filas_cercania.append({
+            "Distancia (m)": round(t["distancia_m"]),
+            "Tipo": "🟠 Tienda abierta",
+            "Nombre": t.get("NAME", ""),
+            "Detalle": f"{t.get('PLAZA 2026', '')} · {t.get('MUNICIPIO', '')}",
+        })
+    for _, p in puntos_potenciales_cercanos.iterrows():
+        filas_cercania.append({
+            "Distancia (m)": round(p["distancia_m"]),
+            "Tipo": "🟣 Punto potencial",
+            "Nombre": p.get("Nombre PP", ""),
+            "Detalle": f"{p.get('Estado', '')} · {p.get('Region', '')} / {p.get('UPZ', '')}",
+        })
 
-    with col_c2:
-        st.markdown("**Puntos Potenciales (microsaturación) cerca**")
-        if not puntos_potenciales_cercanos.empty:
-            cols_pp = [c for c in ["Nombre PP", "Estado", "Region", "UPZ", "Fecha recepción", "distancia_m"] if c in puntos_potenciales_cercanos.columns]
-            st.dataframe(puntos_potenciales_cercanos[cols_pp], hide_index=True, use_container_width=True)
-        else:
-            st.caption("Este punto no aparece antes en la base de Puntos Potenciales.")
+    if filas_cercania:
+        tabla_cercania = pd.DataFrame(filas_cercania).sort_values("Distancia (m)").reset_index(drop=True)
+        st.dataframe(tabla_cercania, hide_index=True, use_container_width=True)
+    else:
+        st.caption("No hay tiendas abiertas ni puntos potenciales dentro del radio.")
 
     st.divider()
     st.subheader("Coincidencias de nombre encontradas")
+    st.caption("Esta comparación es solo por similitud de texto contra tiendas vigentes (no aplica a Puntos Potenciales).")
     if fila_match["Todas las coincidencias"]:
         st.dataframe(
             pd.DataFrame(fila_match["Todas las coincidencias"])[
@@ -388,6 +382,7 @@ else:
         fotos=fotos,
         lat=lat,
         lon=lon,
+        cercania=filas_cercania,
     )
     st.download_button(
         "⬇️ Descargar informe en PDF",
