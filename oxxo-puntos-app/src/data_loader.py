@@ -7,8 +7,9 @@ import os
 import pandas as pd
 import streamlit as st
 
-BOOK_PATH = os.path.join("data", "Book.xlsx")
-VISITAS_PATH = os.path.join("data", "Operaciones_ult_semana.xlsm")
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # sube de src/ a oxxo-puntos-app/
+BOOK_PATH = os.path.join(BASE_DIR, "data", "Book.xlsx")
+VISITAS_PATH = os.path.join(BASE_DIR, "data", "Operaciones_ult_semana.xlsm")
 
 ESTADOS_VIGENTES = ["ABIERTA", "OBRA", "FIRMADA"]
 
