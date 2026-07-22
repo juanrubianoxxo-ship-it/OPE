@@ -381,18 +381,13 @@ else:
     st.divider()
     st.subheader("📄 Informe del punto")
 
-    coincidencias_pdf = list(fila_match["Todas las coincidencias"]) if fila_match["Todas las coincidencias"] else []
-    if not tiendas_cercanas.empty:
-        coincidencias_pdf += tiendas_cercanas.to_dict("records")
-    if not puntos_potenciales_cercanos.empty:
-        coincidencias_pdf += puntos_potenciales_cercanos.to_dict("records")
-
     pdf_bytes = generar_informe_pdf(
         datos=fila_visita.to_dict(),
         nombre_original=seleccion,
         nombre_nuevo=nuevo_nombre,
         fotos=fotos,
-        coincidencias=coincidencias_pdf,
+        lat=lat,
+        lon=lon,
     )
     st.download_button(
         "⬇️ Descargar informe en PDF",
