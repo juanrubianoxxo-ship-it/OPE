@@ -1,5 +1,6 @@
 """
 Persistencia simple del estado "Subido" de cada punto evaluado.
+
 Se guarda en data/estado_subido.json (dentro del repo, en el disco del
 servidor). Persiste mientras la app no se reinicie/redeploye.
 """
