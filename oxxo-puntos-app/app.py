@@ -18,6 +18,140 @@ st.set_page_config(
     layout="wide",
 )
 
+# ---------------------------------------------------------- Tema OXXO -----
+OXXO_ROJO = "#E4032E"
+OXXO_AMARILLO = "#FFD200"
+OXXO_ROJO_OSCURO = "#B4022A"
+OXXO_BLANCO = "#FFFFFF"
+OXXO_GRIS = "#2B2B2B"
+
+st.markdown(
+    f"""
+    <style>
+    /* ---------- Fondo general ---------- */
+    .stApp {{
+        background: linear-gradient(180deg, #fffdf5 0%, #ffffff 35%);
+    }}
+
+    /* ---------- Sidebar ---------- */
+    section[data-testid="stSidebar"] {{
+        background: linear-gradient(180deg, {OXXO_ROJO} 0%, {OXXO_ROJO_OSCURO} 100%);
+    }}
+    section[data-testid="stSidebar"] * {{
+        color: {OXXO_BLANCO} !important;
+    }}
+    section[data-testid="stSidebar"] .stCaption, 
+    section[data-testid="stSidebar"] small {{
+        color: #ffe9ec !important;
+    }}
+    section[data-testid="stSidebar"] hr {{
+        border-color: rgba(255,255,255,0.35) !important;
+    }}
+
+    /* Sliders y radios dentro del sidebar */
+    section[data-testid="stSidebar"] [data-baseweb="slider"] div[role="slider"] {{
+        background-color: {OXXO_AMARILLO} !important;
+        border: 2px solid {OXXO_BLANCO} !important;
+    }}
+    section[data-testid="stSidebar"] [data-testid="stTickBar"] {{
+        display: none;
+    }}
+
+    /* ---------- Títulos ---------- */
+    h1 {{
+        color: {OXXO_ROJO_OSCURO} !important;
+        font-weight: 800 !important;
+        border-bottom: 4px solid {OXXO_AMARILLO};
+        padding-bottom: 8px;
+        display: inline-block;
+    }}
+    h2, h3 {{
+        color: {OXXO_ROJO} !important;
+        font-weight: 700 !important;
+    }}
+
+    /* ---------- Botones ---------- */
+    .stButton > button, .stDownloadButton > button, .stLinkButton > a {{
+        background: linear-gradient(135deg, {OXXO_AMARILLO} 0%, #ffc400 100%) !important;
+        color: {OXXO_GRIS} !important;
+        font-weight: 700 !important;
+        border: 2px solid {OXXO_ROJO} !important;
+        border-radius: 10px !important;
+        transition: transform 0.15s ease, box-shadow 0.15s ease !important;
+        box-shadow: 0 2px 6px rgba(228,3,46,0.25) !important;
+    }}
+    .stButton > button:hover, .stDownloadButton > button:hover, .stLinkButton > a:hover {{
+        transform: translateY(-2px) scale(1.02);
+        box-shadow: 0 6px 14px rgba(228,3,46,0.35) !important;
+        background: linear-gradient(135deg, {OXXO_ROJO} 0%, {OXXO_ROJO_OSCURO} 100%) !important;
+        color: {OXXO_BLANCO} !important;
+        border: 2px solid {OXXO_AMARILLO} !important;
+    }}
+
+    /* ---------- Métricas (tarjetas) ---------- */
+    div[data-testid="stMetric"] {{
+        background: {OXXO_BLANCO};
+        border: 2px solid {OXXO_AMARILLO};
+        border-left: 8px solid {OXXO_ROJO};
+        border-radius: 12px;
+        padding: 14px 16px;
+        box-shadow: 0 3px 10px rgba(0,0,0,0.08);
+        transition: transform 0.15s ease;
+    }}
+    div[data-testid="stMetric"]:hover {{
+        transform: translateY(-3px);
+        box-shadow: 0 8px 18px rgba(228,3,46,0.18);
+    }}
+    div[data-testid="stMetricLabel"] {{
+        color: {OXXO_ROJO_OSCURO} !important;
+        font-weight: 700 !important;
+    }}
+
+    /* ---------- Radios (Vista) ---------- */
+    section[data-testid="stSidebar"] div[role="radiogroup"] label {{
+        background: rgba(255,255,255,0.12);
+        border-radius: 8px;
+        padding: 6px 10px;
+        margin-bottom: 4px;
+        transition: background 0.15s ease;
+    }}
+    section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {{
+        background: rgba(255,210,0,0.3);
+    }}
+
+    /* ---------- Tablas / DataFrames ---------- */
+    div[data-testid="stDataFrame"] {{
+        border: 2px solid {OXXO_AMARILLO};
+        border-radius: 10px;
+        overflow: hidden;
+    }}
+
+    /* ---------- Alertas ---------- */
+    div[data-testid="stAlert"] {{
+        border-radius: 10px;
+        border-left-width: 6px !important;
+    }}
+
+    /* ---------- Checkbox / inputs de texto ---------- */
+    .stTextInput > div > div > input {{
+        border: 2px solid {OXXO_AMARILLO} !important;
+        border-radius: 8px !important;
+    }}
+    .stTextInput > div > div > input:focus {{
+        border: 2px solid {OXXO_ROJO} !important;
+        box-shadow: 0 0 0 2px rgba(228,3,46,0.15) !important;
+    }}
+
+    /* ---------- Selectbox ---------- */
+    div[data-baseweb="select"] > div {{
+        border: 2px solid {OXXO_AMARILLO} !important;
+        border-radius: 8px !important;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ---------------------------------------------------------------- Sidebar --
 with st.sidebar:
     st.title("📍 Panel de control")
@@ -43,8 +177,13 @@ with st.sidebar:
 
     st.divider()
     radio_cercania_m = st.slider(
-        "Radio de cercanía (metros) para tiendas abiertas / puntos potenciales",
+        "Radio de cercanía (metros) para tiendas abiertas",
         min_value=50, max_value=1000, value=300, step=25,
+    )
+    st.caption(
+        "Este radio solo aplica a la tabla de cercanía de **tiendas "
+        "abiertas**. En el mapa se muestran **todos** los puntos "
+        "potenciales, sin importar la distancia."
     )
 
     st.divider()
@@ -105,8 +244,8 @@ with st.sidebar:
     if puntos_potenciales.empty:
         st.caption(
             "⚠️ No encontré `data/Puntos_Potenciales.xlsx` (o la hoja "
-            "'MS26' vino vacía). Súbelo al repo para activar la búsqueda "
-            "de puntos potenciales cercanos."
+            "'MS26' vino vacía). Súbelo al repo para activar los puntos "
+            "potenciales en el mapa."
         )
 
 # ---------------------------------------------------- Aplicar filtros -----
@@ -273,6 +412,7 @@ else:
 
     st.divider()
     st.subheader("Ubicación en el mapa")
+    st.caption("Haz clic en cualquier punto del mapa para ver su información.")
 
     direccion = fila_visita.get("Dirección", "")
     lat, lon, fuente = get_coordinates(maps_link, direccion)
@@ -283,17 +423,23 @@ else:
     if lat is not None:
         st.caption(f"Coordenadas obtenidas — {fuente} · lat: {lat:.6f}, lon: {lon:.6f}")
 
-        m = folium.Map(location=[lat, lon], zoom_start=16)
+        m = folium.Map(location=[lat, lon], zoom_start=15)
 
-        # Punto evaluado (el que estás revisando)
+        # ---- Punto evaluado (el que estás revisando) --------------------
+        popup_evaluado = folium.Popup(
+            f"<b>📍 {seleccion}</b><br>"
+            f"Jefe de zona: {fila_visita.get('Jefe de zona', '')}<br>"
+            f"Estado visita: {fila_visita.get('Estado', '')}<br>"
+            f"Dirección: {fila_visita.get('Dirección', '')}",
+            max_width=300,
+        )
         folium.Marker(
             [lat, lon],
-            tooltip=folium.Tooltip(seleccion, permanent=True, direction="top"),
-            popup=seleccion,
+            popup=popup_evaluado,
             icon=folium.Icon(color="blue", icon="star"),
         ).add_to(m)
 
-        # -------------------------------------- Búsqueda por radio (300 m) --
+        # -------------------------------------- Tiendas cercanas (radio) --
         # `tiendas` (load_tiendas) ya viene filtrada a ABIERTA/OBRA/FIRMADA;
         # aquí nos quedamos solo con ABIERTA, que es lo que pediste.
         tiendas_abiertas = tiendas[tiendas["ESTADO"] == "ABIERTA"]
@@ -301,25 +447,50 @@ else:
             lat, lon, tiendas_abiertas, lat_col="lat", lon_col="lon", radio_m=radio_cercania_m
         )
         for _, t in tiendas_cercanas.iterrows():
+            popup_tienda = folium.Popup(
+                f"<b>🟠 {t.get('NAME', '')}</b><br>"
+                f"Estado: {t.get('ESTADO', '')}<br>"
+                f"Plaza 2026: {t.get('PLAZA 2026', '')}<br>"
+                f"Municipio: {t.get('MUNICIPIO', '')}<br>"
+                f"Distancia: {round(t.get('distancia_m', 0))} m",
+                max_width=300,
+            )
             folium.Marker(
                 [t["lat"], t["lon"]],
-                tooltip=folium.Tooltip(str(t.get("NAME", "")), permanent=True, direction="right"),
+                popup=popup_tienda,
                 icon=folium.Icon(color="orange", icon="shopping-cart"),
             ).add_to(m)
 
+        # ------------------------- TODOS los puntos potenciales (sin radio) --
         if not puntos_potenciales.empty:
-            puntos_potenciales_cercanos = buscar_puntos_potenciales_cercanos(
-                lat, lon, radio_m=radio_cercania_m, df_pp=puntos_potenciales
-            )
-            for _, p in puntos_potenciales_cercanos.iterrows():
+            for _, p in puntos_potenciales.iterrows():
+                if pd.isna(p.get("lat")) or pd.isna(p.get("lon")):
+                    continue
+                popup_pp = folium.Popup(
+                    f"<b>🟣 {p.get('Nombre PP', '')}</b><br>"
+                    f"Estado: {p.get('Estado', '')}<br>"
+                    f"Región: {p.get('Region', '')}<br>"
+                    f"UPZ: {p.get('UPZ', '')}<br>"
+                    f"Riesgo: {p.get('Riesgo', '')}",
+                    max_width=300,
+                )
                 folium.Marker(
                     [p["lat"], p["lon"]],
-                    tooltip=folium.Tooltip(str(p.get("Nombre PP", "")), permanent=True, direction="left"),
+                    popup=popup_pp,
                     icon=folium.Icon(color="purple", icon="flag"),
                 ).add_to(m)
 
-        st.caption("🔵 Punto evaluado · 🟠 Tiendas abiertas (Book) · 🟣 Puntos potenciales")
-        st_folium(m, use_container_width=True, height=450, returned_objects=[])
+            # Para la tabla de cercanía (texto) sí seguimos usando el radio
+            puntos_potenciales_cercanos = buscar_puntos_potenciales_cercanos(
+                lat, lon, radio_m=radio_cercania_m, df_pp=puntos_potenciales
+            )
+
+        st.caption(
+            "🔵 Punto evaluado · 🟠 Tiendas abiertas cercanas "
+            f"(radio {radio_cercania_m} m) · 🟣 Todos los puntos "
+            "potenciales — haz clic en cualquiera para ver el detalle."
+        )
+        st_folium(m, use_container_width=True, height=480, returned_objects=[])
     else:
         st.warning(f"No se pudo ubicar el punto en el mapa. Motivo: {fuente}")
 
