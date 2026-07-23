@@ -1,7 +1,8 @@
 """
 Genera un informe PDF de un punto evaluado (base de Operaciones):
 datos principales, nombre original vs. nombre nuevo propuesto, ubicación
-(link de Maps + coordenadas) y fotos del local.
+(link de Maps + coordenadas), cercanía (tiendas/puntos potenciales) y
+fotos del local.
 
 Uso típico desde app.py:
 
@@ -14,6 +15,7 @@ Uso típico desde app.py:
         fotos=fotos,
         lat=lat,
         lon=lon,
+        cercania=filas_cercania,
     )
     st.download_button("Descargar informe PDF", pdf_bytes,
                         file_name=f"informe_{id_punto}.pdf",
@@ -76,10 +78,16 @@ def generar_informe_pdf(
     nombre_nuevo: Optional[str] = None,
     lat: Optional[float] = None,
     lon: Optional[float] = None,
+    cercania: Optional[list[dict]] = None,
 ) -> bytes:
     """
     Construye el informe en memoria y devuelve los bytes del PDF, listos
     para pasar a st.download_button.
+
+    `cercania` es opcional: una lista de dicts (como la que arma app.py en
+    `filas_cercania`), típicamente con las llaves "Distancia (m)", "Tipo",
+    "Nombre" y "Detalle". Si viene vacía o None, esa sección simplemente
+    no se imprime.
     """
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -192,6 +200,38 @@ def generar_informe_pdf(
             )
         )
         story.append(tabla_ubi)
+        story.append(Spacer(1, 10))
+
+    # ---- Cercanía: tiendas abiertas / puntos potenciales cercanos ------
+    if cercania:
+        story.append(Paragraph("Cercanía (tiendas abiertas y puntos potenciales)", subtitulo_style))
+        encabezado = ["Distancia (m)", "Tipo", "Nombre", "Detalle"]
+        filas_cercania_pdf = [encabezado]
+        for fila in cercania:
+            filas_cercania_pdf.append([
+                str(fila.get("Distancia (m)", "")),
+                str(fila.get("Tipo", "")),
+                str(fila.get("Nombre", "")),
+                str(fila.get("Detalle", "")),
+            ])
+        tabla_cerc = Table(
+            filas_cercania_pdf,
+            colWidths=[2.3 * cm, 3.2 * cm, 5.5 * cm, 4.5 * cm],
+        )
+        tabla_cerc.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#333333")),
+                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("FONTSIZE", (0, 0), (-1, -1), 8),
+                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f7f7")]),
+                ]
+            )
+        )
+        story.append(tabla_cerc)
         story.append(Spacer(1, 10))
 
     # ---- Fotos ----------------------------------------------------------
