@@ -410,12 +410,13 @@ else:
         else:
             st.info("Este punto no tiene fotos cargadas.")
 
-    st.divider()
+        st.divider()
     st.subheader("Ubicación en el mapa")
     if FONDO_PATH.exists():
         st.markdown(f'<div style="background-image: url("{str(FONDO_PATH)}"); background-size: cover; background-position: center; padding: 10px; border-radius: 10px;">', unsafe_allow_html=True)
     st.caption("Haz clic en cualquier punto del mapa para ver su información.")
 
+    # Coordenadas del punto seleccionado (extraídas del enlace de Maps por data_loader)
     lat = fila_visita.get("lat")
     lon = fila_visita.get("lon")
     tiene_coordenadas_punto = (
@@ -424,19 +425,31 @@ else:
     if tiene_coordenadas_punto:
         lat, lon = float(lat), float(lon)
 
+    # --- Todas las capas de puntos mapeables ---
     tiendas_cercanas = pd.DataFrame()
     puntos_potenciales_cercanos = pd.DataFrame()
 
-    hay_subidos_mapeables = not operaciones_growth_subidas.empty
+    # Todas las tiendas abiertas (para el mapa completo)
+    tiendas_abiertas = tiendas[tiendas["ESTADO"] == "ABIERTA"]
+
+    # Determinar el centro del mapa y el zoom
     if tiene_coordenadas_punto:
         centro_mapa = [lat, lon]
         zoom_inicial = 15
-    elif hay_subidos_mapeables:
-        centro_mapa = [
-            float(operaciones_growth_subidas["lat"].mean()),
-            float(operaciones_growth_subidas["lon"].mean()),
+    elif not operaciones_growth_subidas.empty:
+        # Si hay puntos subidos con coordenadas, centrar en su promedio
+        subidos_con_coords = operaciones_growth_subidas[
+            operaciones_growth_subidas["lat"].notna() & operaciones_growth_subidas["lon"].notna()
         ]
-        zoom_inicial = 6
+        if not subidos_con_coords.empty:
+            centro_mapa = [
+                float(subidos_con_coords["lat"].mean()),
+                float(subidos_con_coords["lon"].mean()),
+            ]
+            zoom_inicial = 8
+        else:
+            centro_mapa = None
+            zoom_inicial = 6
     elif not puntos_potenciales.empty:
         centro_mapa = [
             float(puntos_potenciales["lat"].mean()),
@@ -453,9 +466,10 @@ else:
         capa_iso = folium.FeatureGroup(name="Puntos potenciales ISO")
         capa_growth = folium.FeatureGroup(name="Operaciones · Estado Growth Subido")
 
+        # --- Punto evaluado (selección actual) ---
         if tiene_coordenadas_punto:
             st.success(
-                f"✅ Coordenadas extraídas del enlace de Maps · lat: {lat:.6f}, lon: {lon:.6f}. "
+                f"✅ Coordenadas extraídas del enlace de Maps · lat: {lat:.6f}, lon: {lon:.6f}."
             )
             popup_evaluado = folium.Popup(
                 "<b>📍 " + html.escape(str(seleccion)) + "</b><br>"
@@ -474,7 +488,7 @@ else:
                 icon=custom_icon,
             ).add_to(m)
 
-            tiendas_abiertas = tiendas[tiendas["ESTADO"] == "ABIERTA"]
+            # Tiendas cercanas solo si el punto tiene coordenadas
             tiendas_cercanas = buscar_cercanos(
                 lat, lon, tiendas_abiertas,
                 lat_col="lat", lon_col="lon", radio_m=radio_cercania_m,
@@ -493,7 +507,29 @@ else:
                     popup=popup_tienda,
                     icon=folium.Icon(color="orange", icon="shopping-cart"),
                 ).add_to(capa_tiendas)
+        else:
+            # Si el punto no tiene coordenadas, mostrar todas las tiendas abiertas en el mapa
+            if not tiendas_abiertas.empty:
+                for _, tienda in tiendas_abiertas.iterrows():
+                    if pd.notna(tienda.get("lat")) and pd.notna(tienda.get("lon")):
+                        popup_tienda = folium.Popup(
+                            "<b>🟠 " + html.escape(str(tienda.get("NAME", ""))) + "</b><br>"
+                            "Estado: " + html.escape(str(tienda.get("ESTADO", ""))) + "<br>"
+                            "Plaza 2026: " + html.escape(str(tienda.get("PLAZA 2026", ""))) + "<br>"
+                            "Municipio: " + html.escape(str(tienda.get("MUNICIPIO", ""))),
+                            max_width=300,
+                        )
+                        folium.Marker(
+                            [tienda["lat"], tienda["lon"]],
+                            popup=popup_tienda,
+                            icon=folium.Icon(color="orange", icon="shopping-cart"),
+                        ).add_to(capa_tiendas)
+            st.caption(
+                f"⚠️ Este punto no tiene coordenadas en el enlace de Maps. "
+                f"El mapa muestra los puntos Subidos y tiendas cercanas."
+            )
 
+        # --- Puntos potenciales ISO ---
         if not puntos_potenciales.empty:
             for _, punto_iso in puntos_potenciales.iterrows():
                 popup_iso = folium.Popup(
@@ -515,7 +551,14 @@ else:
                     lat, lon, radio_m=radio_cercania_m, df_pp=puntos_potenciales,
                 )
 
-        for _, punto_subido in operaciones_growth_subidas.iterrows():
+        # --- Capa de puntos con Estado Growth = Subido (coordenadas de Maps) ---
+        # Se filtran solo los que tienen coordenadas válidas extraídas del enlace de Maps
+        subidos_mapeables = operaciones_growth_subidas[
+            operaciones_growth_subidas["lat"].notna() & operaciones_growth_subidas["lon"].notna()
+        ].copy()
+
+        for _, punto_subido in subidos_mapeables.iterrows():
+            # Si el punto seleccionado es el mismo que este subido, ya está en el mapa como estrella
             if tiene_coordenadas_punto and str(punto_subido.get("ID", "")) == id_punto:
                 continue
             nombre_subido = html.escape(str(punto_subido.get("Nombre del Punto", "")))
@@ -527,7 +570,7 @@ else:
                 max_width=300,
             )
             folium.CircleMarker(
-                [punto_subido["lat"], punto_subido["lon"]],
+                [float(punto_subido["lat"]), float(punto_subido["lon"])],
                 radius=7,
                 popup=popup_subido,
                 color="#B4022A",
@@ -542,19 +585,20 @@ else:
         capa_growth.add_to(m)
         folium.LayerControl(collapsed=True).add_to(m)
 
+        # Conteo de puntos en el mapa
+        n_subidos_en_mapa = len(subidos_mapeables) - (1 if tiene_coordenadas_punto and id_punto in operaciones_growth_subidas["ID"].astype(str).tolist() else 0)
         st.caption(
-            "🔵 Punto evaluado · 🟠 Tiendas abiertas cercanas · "
-            "🟣 Puntos potenciales (hoja ISO) · 🔴 Operaciones con "
-            "Estado Growth = Subido. Usa el control superior derecho para ocultar capas."
+            f"🔵 Punto evaluado · 🟠 Tiendas abiertas · "
+            f"🟣 Puntos potenciales (ISO) · 🔴 Operaciones Subidas ({n_subidos_en_mapa} en el mapa). "
+            f"Usa el control superior derecho para ocultar capas."
         )
         st_folium(m, use_container_width=True, height=500, returned_objects=[])
         if FONDO_PATH.exists():
             st.markdown('</div>', unsafe_allow_html=True)
     else:
         st.warning(
-            "Este punto no tiene coordenadas explícitas en la hoja "
-            "`Visitas_Operaciones`. Para respetar el cambio solicitado, "
-            "no se utilizó ni se geocodificó el enlace de Maps."
+            "No hay coordenadas disponibles para mostrar en el mapa. "
+            "Verifica que los puntos tengan un enlace válido de Google Maps."
         )
 
     if n_growth_subidos_sin_coordenadas:
