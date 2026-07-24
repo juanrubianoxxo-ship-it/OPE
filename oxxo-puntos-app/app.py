@@ -17,7 +17,6 @@ import os
 from pathlib import Path
 
 # ========== NUEVO: Import para calendario visual ==========
-from streamlit_calendar import calendar
 import datetime as dt
 
 ASSETS_DIR = Path("src/assets")
@@ -276,49 +275,30 @@ with st.sidebar:
             horizontal=False,
         )
 
-        # Preparar datos del calendario (proyectos por fecha)
-        fechas_con_proyectos = {}
-        for _, fila in visitas_full.iterrows():
-            if pd.notna(fila.get(DATE_COLUMN_STD)):
-                fecha_str = fila[DATE_COLUMN_STD].strftime("%Y-%m-%d")
-                nombre = str(fila.get("Nombre del Punto", "Sin nombre"))
-                fechas_con_proyectos.setdefault(fecha_str, []).append(nombre)
-
-        calendar_events = []
-        for fecha_str, nombres in fechas_con_proyectos.items():
-            calendar_events.append({
-                "title": f"{len(nombres)} proy.",
-                "start": fecha_str,
-                "allDay": True,
-                "backgroundColor": OXXO_ROJO,
-                "borderColor": OXXO_ROJO_OSCURO,
-                "textColor": OXXO_BLANCO,
-            })
-
-        custom_css_cal = f"""
-            .fc-event-past {{
-                opacity: 0.85;
-            }}
-            .fc-event-title {{
-                font-weight: 700;
-                font-size: 0.85em;
-            }}
-            .fc-toolbar-title {{
-                font-size: 1.2rem;
-            }}
-            .fc-daygrid-day-number {{
-                font-weight: 600;
-            }}
-            .fc-daygrid-day.fc-day-today {{
-                background-color: rgba(228, 3, 46, 0.08);
-            }}
-        """
-
         # ============================================
         # OPCIÓN A: Calendario visual (FullCalendar)
+        # Solo se renderiza si el usuario elige esta opción
         # ============================================
         if modo_filtro == "📆 Calendario visual":
+            from streamlit_calendar import calendar
             st.caption("Haz clic en un día para ver sus proyectos. Arrastra para seleccionar un rango.")
+
+            # Construir eventos del calendario de forma vectorizada (mucho más rápido)
+            fechas_validas = visitas_full[visitas_full[DATE_COLUMN_STD].notna()].copy()
+            fechas_validas["fecha_str"] = fechas_validas[DATE_COLUMN_STD].dt.strftime("%Y-%m-%d")
+            conteo_proyectos = fechas_validas.groupby("fecha_str").size()
+
+            calendar_events = [
+                {
+                    "title": f"{n} proy.",
+                    "start": fecha,
+                    "allDay": True,
+                    "backgroundColor": OXXO_ROJO,
+                    "borderColor": OXXO_ROJO_OSCURO,
+                    "textColor": OXXO_BLANCO,
+                }
+                for fecha, n in conteo_proyectos.items()
+            ]
 
             calendar_options = {
                 "selectable": True,
@@ -335,6 +315,25 @@ with st.sidebar:
                 "dayMaxEvents": 3,
                 "moreLinkClick": "day",
             }
+
+            custom_css_cal = f"""
+                .fc-event-past {{
+                    opacity: 0.85;
+                }}
+                .fc-event-title {{
+                    font-weight: 700;
+                    font-size: 0.85em;
+                }}
+                .fc-toolbar-title {{
+                    font-size: 1.2rem;
+                }}
+                .fc-daygrid-day-number {{
+                    font-weight: 600;
+                }}
+                .fc-daygrid-day.fc-day-today {{
+                    background-color: rgba(228, 3, 46, 0.08);
+                }}
+            """
 
             cal = calendar(
                 events=calendar_events,
@@ -382,7 +381,7 @@ with st.sidebar:
                 st.rerun()
 
         # ============================================
-        # OPCIÓN B: Rango manual con date_input
+        # OPCIÓN B: Rango manual con date_input (rápido, sin calendario)
         # ============================================
         elif modo_filtro == "🔢 Rango manual":
             rango_fecha = st.date_input(
@@ -393,56 +392,22 @@ with st.sidebar:
             )
 
         # ============================================
-        # OPCIÓN C: Un día específico (con mini calendario)
+        # OPCIÓN C: Un día específico (solo date_input, rápido)
         # ============================================
         elif modo_filtro == "📌 Un día específico":
-            st.caption("Haz clic en un día del calendario o selecciona manualmente abajo:")
-
-            cal_mini_options = {
-                "selectable": True,
-                "editable": False,
-                "headerToolbar": {
-                    "left": "today prev,next",
-                    "center": "title",
-                    "right": "dayGridMonth",
-                },
-                "initialView": "dayGridMonth",
-                "locale": "es",
-                "firstDay": 1,
-                "height": "auto",
-            }
-
-            cal_mini = calendar(
-                events=calendar_events,
-                options=cal_mini_options,
-                custom_css=custom_css_cal,
-                key="calendar_dia_especifico",
-            )
-
-            if cal_mini:
-                callback = cal_mini.get("callback")
-                if callback == "dateClick":
-                    date_str = cal_mini.get("dateClick", {}).get("date")
-                    if date_str:
-                        fecha_unica = dt.datetime.strptime(date_str[:10], "%Y-%m-%d").date()
-                        fecha_unica_seleccionada = True
-                elif callback == "eventClick":
-                    event_data = cal_mini.get("eventClick", {}).get("event", {})
-                    start_str = event_data.get("start")
-                    if start_str:
-                        fecha_unica = dt.datetime.strptime(start_str[:10], "%Y-%m-%d").date()
-                        fecha_unica_seleccionada = True
-
-            # Fallback: input manual
-            fecha_manual = st.date_input(
-                "O selecciona manualmente:",
+            fecha_unica = st.date_input(
+                "Selecciona el día",
                 value=fecha_max,
                 min_value=fecha_min_historica,
                 max_value=fecha_max,
             )
-            if fecha_manual and not fecha_unica_seleccionada:
-                fecha_unica = fecha_manual
+            if fecha_unica:
                 fecha_unica_seleccionada = True
+                # Mostrar cuántos proyectos hay ese día
+                conteo_dia = int((
+                    visitas_full[DATE_COLUMN_STD].dt.date == fecha_unica
+                ).sum())
+                st.caption(f"Hay **{conteo_dia} proyecto(s)** el {fecha_unica.strftime('%d/%m/%Y')}.")
 
     else:
         st.caption(
