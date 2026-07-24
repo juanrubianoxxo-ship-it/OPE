@@ -3,9 +3,9 @@ Carga y normalización de las bases de datos de la aplicación.
 
 - ``Book.xlsx`` (hoja ``JUN``): tiendas vigentes con coordenadas X/Y.
 - ``Operaciones_ult_semana.xlsm`` (hoja ``Visitas_Operaciones``): puntos
-  evaluados. Para el mapa se usan exclusivamente columnas explícitas de
-  latitud y longitud de esta hoja; el enlace de Maps se conserva como
-  referencia, pero no se utiliza para obtener la ubicación.
+  evaluados. Se usan las coordenadas de las columnas Y (latitud) y X (longitud)
+  si existen; si no, se extraen del enlace de Google Maps usando la cascada
+  de maps_utils.py.
 """
 from __future__ import annotations
 
@@ -40,19 +40,6 @@ VISITAS_RENAME = {
 DATE_COLUMN_STD = "Fecha"
 DATE_COLUMN_HINTS = ["fecha de visita", "fecha visita", "fecha de la visita", "fecha"]
 
-# Se aceptan encabezados frecuentes, pero solo pares explícitos de coordenadas.
-# No se consulta ni se resuelve el enlace de Google Maps para ubicar el punto.
-LATITUDE_COLUMN_HINTS = (
-    "latitud", "latitude", "lat", "y",
-    "coordenada latitud", "coordenadas latitud", "coordenada y", "coordenadas y",
-    "latitud gps", "latitud ubicacion", "latitud de la ubicacion",
-)
-LONGITUDE_COLUMN_HINTS = (
-    "longitud", "longitude", "lon", "lng", "x",
-    "coordenada longitud", "coordenadas longitud", "coordenada x", "coordenadas x",
-    "longitud gps", "longitud ubicacion", "longitud de la ubicacion",
-)
-
 
 def _file_signature(path: str):
     """mtime + size para invalidar el caché cuando se reemplaza un Excel."""
@@ -77,67 +64,50 @@ def _normalizar_encabezado(value: object) -> str:
     return "".join(str(value).casefold().strip().replace("_", " ").split())
 
 
-def _find_coordinate_column(df: pd.DataFrame, hints: Iterable[str]):
-    """Devuelve el encabezado real que coincide con alguna variante válida."""
-    by_normalized = {
-        _normalizar_encabezado(column): column
-        for column in df.columns
-        if isinstance(column, str)
-    }
-    for hint in hints:
-        result = by_normalized.get(_normalizar_encabezado(hint))
-        if result is not None:
-            return result
-    return None
-
-
-def _to_coordinate(series: pd.Series) -> pd.Series:
-    """Convierte coordenadas a número y admite coma decimal cuando aplique."""
-    cleaned = series.astype(str).str.strip().str.replace(",", ".", regex=False)
-    return pd.to_numeric(cleaned, errors="coerce")
-
-
 def _add_visit_coordinates(df: pd.DataFrame) -> tuple[str | None, str | None]:
     """
     Agrega las columnas normalizadas ``lat`` y ``lon``.
-    Usa la estrategia en cascada de maps_utils:
-    1. Parseo directo del enlace de Google Maps
-    2. Resolver links acortados (maps.app.goo.gl)
-    3. Geocodificación por dirección con Nominatim
-    """
-    from src.maps_utils import get_coordinates
 
+    Prioridad de fuentes:
+    1. Columnas Y (latitud) y X (longitud) explícitas en el Excel
+    2. Enlace de Google Maps (parseo + resolución de links cortos)
+    3. Enlace de Bing Maps
+    4. Geocodificación por dirección con Nominatim
+    """
     df["lat"] = pd.Series(float("nan"), index=df.index, dtype="float64")
     df["lon"] = pd.Series(float("nan"), index=df.index, dtype="float64")
 
-    # Buscar la columna de Maps - buscar varios nombres posibles
     maps_col = None
-    # Primero buscar con el nombre exacto esperado
+    address_col = None
+
+    # --- FUENTE 1: Columnas Y (lat) y X (lon) explícitas ---
+    tiene_y = "Y" in df.columns
+    tiene_x = "X" in df.columns
+    usar_xy = tiene_y and tiene_x
+
+    if usar_xy:
+        # Convertir Y y X a numérico
+        df["lat"] = pd.to_numeric(df["Y"], errors="coerce")
+        df["lon"] = pd.to_numeric(df["X"], errors="coerce")
+        # Validar rango
+        valid = df["lat"].between(-90, 90) & df["lon"].between(-180, 180)
+        df.loc[~valid, ["lat", "lon"]] = float("nan")
+
+    # --- FUENTE 2: Enlace de Google Maps ---
+    # Buscar la columna de Maps
     for col in df.columns:
         if isinstance(col, str):
             col_lower = col.lower().strip()
-            if ("enlace" in col_lower and "maps" in col_lower) or \
-               ("ubicación" in col_lower) or \
-               ("google maps" in col_lower) or \
-               col_lower == "maps" or \
-               col_lower == "mapa":
+            if "enlace" in col_lower and "maps" in col_lower:
                 maps_col = col
                 break
-    # Si no se encontró, buscar cualquier columna que contenga "maps"
     if maps_col is None:
         for col in df.columns:
             if isinstance(col, str) and "maps" in col.lower():
                 maps_col = col
                 break
-    # Última opción: buscar "ubicación"
-    if maps_col is None:
-        for col in df.columns:
-            if isinstance(col, str) and "ubicac" in col.lower():
-                maps_col = col
-                break
 
-    # Obtener columna de dirección para respaldo de geocodificación
-    address_col = None
+    # Buscar columna de dirección para respaldo
     for col in df.columns:
         if isinstance(col, str):
             col_lower = col.lower().strip()
@@ -145,26 +115,32 @@ def _add_visit_coordinates(df: pd.DataFrame) -> tuple[str | None, str | None]:
                 address_col = col
                 break
 
-    if maps_col:
-        for idx, row in df.iterrows():
+    # Si la fuente 1 no cubrió todos, completar con Maps
+    sin_coordenadas = df["lat"].isna()
+    if maps_col and sin_coordenadas.any():
+        from src.maps_utils import get_coordinates, geocode_address
+
+        for idx, row in df[sin_coordenadas].iterrows():
             maps_link = row.get(maps_col, "")
             address = row.get(address_col, "") if address_col else ""
             if not isinstance(maps_link, str) or not maps_link.strip():
                 if isinstance(address, str) and address.strip():
-                    # Respaldo: geocodificar por dirección
-                    from src.maps_utils import geocode_address
                     coords = geocode_address(address)
                     if coords:
                         df.at[idx, "lat"] = coords[0]
                         df.at[idx, "lon"] = coords[1]
                 continue
-            lat, lon, _ = get_coordinates(maps_link, address if isinstance(address, str) else "")
+            lat, lon, _ = get_coordinates(
+                maps_link, address if isinstance(address, str) else ""
+            )
             if lat is not None and lon is not None:
                 df.at[idx, "lat"] = lat
                 df.at[idx, "lon"] = lon
 
+    # Validación final
     valid = df["lat"].between(-90, 90) & df["lon"].between(-180, 180)
     df.loc[~valid, ["lat", "lon"]] = float("nan")
+
     return maps_col, address_col
 
 
@@ -190,7 +166,7 @@ def load_tiendas(_sig=None) -> pd.DataFrame:
 
 @st.cache_data(show_spinner="Cargando puntos evaluados (Operaciones)...")
 def load_visitas(_sig=None) -> pd.DataFrame:
-    """Carga Operaciones y deja ``lat``/``lon`` listos si la base los trae."""
+    """Carga Operaciones y deja ``lat``/``lon`` listos."""
     _file_signature(VISITAS_PATH)
     df = pd.read_excel(
         VISITAS_PATH, sheet_name="Visitas_Operaciones", engine="openpyxl"
@@ -218,8 +194,12 @@ def load_visitas(_sig=None) -> pd.DataFrame:
     else:
         df["ID"] = df.index.astype(str)
 
-    lat_source, lon_source = _add_visit_coordinates(df)
-    df.attrs["coordinate_sources"] = {"latitud": lat_source, "longitud": lon_source}
+    maps_col, address_col = _add_visit_coordinates(df)
+    df.attrs["coordinate_sources"] = {
+        "maps_column": maps_col,
+        "address_column": address_col,
+        "con_xy_y_x": ("Y" in df.columns and "X" in df.columns),
+    }
     return df.reset_index(drop=True)
 
 
