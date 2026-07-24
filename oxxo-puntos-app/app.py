@@ -430,6 +430,21 @@ else:
     if tiene_coordenadas_punto:
         lat, lon = float(lat), float(lon)
 
+    # Inicializar variables de cercanía (siempre definidas para evitar NameError)
+    tiendas_cercanas = pd.DataFrame()
+    puntos_potenciales_cercanos = pd.DataFrame()
+    filas_cercania = []
+    filas_tiendas_pdf = []
+
+    if tiene_coordenadas_punto:
+        tiendas_cercanas = buscar_cercanos(
+            lat, lon, tiendas_abiertas,
+            lat_col="lat", lon_col="lon", radio_m=radio_cercania_m,
+        )
+        puntos_potenciales_cercanos = buscar_puntos_potenciales_cercanos(
+            lat, lon, radio_m=radio_cercania_m, df_pp=puntos_potenciales,
+        )
+
     # --- Capa de puntos con Estado Growth = Subido (coordenadas de Maps) ---
     # Siempre usar visitas_full para que no dependa del filtro
     estado_growth_full = visitas_full.get(
@@ -492,11 +507,6 @@ else:
                 icon=custom_icon,
             ).add_to(m)
 
-            # Tiendas cercanas
-            tiendas_cercanas = buscar_cercanos(
-                lat, lon, tiendas_abiertas,
-                lat_col="lat", lon_col="lon", radio_m=radio_cercania_m,
-            )
             for _, tienda in tiendas_cercanas.iterrows():
                 popup_tienda = folium.Popup(
                     "<b>🟠 " + html.escape(str(tienda.get("NAME", ""))) + "</b><br>"
@@ -566,8 +576,6 @@ else:
         "las cinco tiendas abiertas más cercanas."
     )
 
-    filas_cercania = []
-    filas_tiendas_pdf = []
     for _, tienda in tiendas_cercanas.iterrows():
         fila_tienda = {
             "Distancia (m)": round(tienda["distancia_m"]),
