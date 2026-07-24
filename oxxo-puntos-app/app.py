@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 
 
-ASSETS_DIR = Path("src/assets")
+ASSETS_DIR = Path("oxxo-puntos-app/src/assets")
 LOGO_PATH = ASSETS_DIR / "logo_oxxo_simil.png"
 ICONO_PATH = ASSETS_DIR / "icono_app.png"
 FONDO_PATH = ASSETS_DIR / "fondo_login.png"
