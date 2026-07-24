@@ -1,13 +1,21 @@
 """
-Carga y normalización de las dos bases de datos:
-- Book.xlsx (hoja JUN): tiendas ABIERTA / OBRA / FIRMADA con coordenadas.
-- Operaciones_ult_semana.xlsm (hoja Visitas_Operaciones): puntos evaluados.
+Carga y normalización de las bases de datos de la aplicación.
+
+- ``Book.xlsx`` (hoja ``JUN``): tiendas vigentes con coordenadas X/Y.
+- ``Operaciones_ult_semana.xlsm`` (hoja ``Visitas_Operaciones``): puntos
+  evaluados. Para el mapa se usan exclusivamente columnas explícitas de
+  latitud y longitud de esta hoja; el enlace de Maps se conserva como
+  referencia, pero no se utiliza para obtener la ubicación.
 """
+from __future__ import annotations
+
 import os
+from typing import Iterable
+
 import pandas as pd
 import streamlit as st
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # sube de src/ a oxxo-puntos-app/
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOOK_PATH = os.path.join(BASE_DIR, "data", "Book.xlsx")
 VISITAS_PATH = os.path.join(BASE_DIR, "data", "Operaciones_ult_semana.xlsm")
 
@@ -28,26 +36,32 @@ VISITAS_RENAME = {
     " RENTA UM": "RENTA UM",
 }
 
-# Nombre de columna "estándar" que usa el resto de la app (el filtro por
-# fecha en app.py). Se llena automáticamente detectando alguna columna del
-# Excel cuyo nombre contenga "fecha" (ver _find_date_column). Si tu hoja
-# usa un nombre muy distinto (que no contenga la palabra "fecha"), agrégalo
-# a DATE_COLUMN_HINTS.
+# Nombre de columna estándar para el filtro de fecha de la interfaz.
 DATE_COLUMN_STD = "Fecha"
 DATE_COLUMN_HINTS = ["fecha de visita", "fecha visita", "fecha de la visita", "fecha"]
 
+# Se aceptan encabezados frecuentes, pero solo pares explícitos de coordenadas.
+# No se consulta ni se resuelve el enlace de Google Maps para ubicar el punto.
+LATITUDE_COLUMN_HINTS = (
+    "latitud", "latitude", "lat", "y",
+    "coordenada latitud", "coordenadas latitud", "coordenada y", "coordenadas y",
+    "latitud gps", "latitud ubicacion", "latitud de la ubicacion",
+)
+LONGITUDE_COLUMN_HINTS = (
+    "longitud", "longitude", "lon", "lng", "x",
+    "coordenada longitud", "coordenadas longitud", "coordenada x", "coordenadas x",
+    "longitud gps", "longitud ubicacion", "longitud de la ubicacion",
+)
+
 
 def _file_signature(path: str):
-    """mtime + size, se usa como parte de la cache key para invalidar el
-    cache automáticamente cuando reemplaces el Excel en el repo."""
+    """mtime + size para invalidar el caché cuando se reemplaza un Excel."""
     stat = os.stat(path)
     return (path, stat.st_mtime, stat.st_size)
 
 
 def _find_date_column(df: pd.DataFrame):
-    """Busca la columna de fecha en 'Visitas_Operaciones'. Prueba primero
-    los nombres exactos en DATE_COLUMN_HINTS (en orden) y, si no encuentra
-    ninguno, cualquier columna cuyo nombre contenga la palabra 'fecha'."""
+    """Encuentra una columna de fecha en ``Visitas_Operaciones``."""
     cols_lower = {c.lower().strip(): c for c in df.columns if isinstance(c, str)}
     for hint in DATE_COLUMN_HINTS:
         if hint in cols_lower:
@@ -58,9 +72,55 @@ def _find_date_column(df: pd.DataFrame):
     return None
 
 
+def _normalizar_encabezado(value: object) -> str:
+    """Normaliza un encabezado para comparar variantes de escritura."""
+    return "".join(str(value).casefold().strip().replace("_", " ").split())
+
+
+def _find_coordinate_column(df: pd.DataFrame, hints: Iterable[str]):
+    """Devuelve el encabezado real que coincide con alguna variante válida."""
+    by_normalized = {
+        _normalizar_encabezado(column): column
+        for column in df.columns
+        if isinstance(column, str)
+    }
+    for hint in hints:
+        result = by_normalized.get(_normalizar_encabezado(hint))
+        if result is not None:
+            return result
+    return None
+
+
+def _to_coordinate(series: pd.Series) -> pd.Series:
+    """Convierte coordenadas a número y admite coma decimal cuando aplique."""
+    cleaned = series.astype(str).str.strip().str.replace(",", ".", regex=False)
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
+def _add_visit_coordinates(df: pd.DataFrame) -> tuple[str | None, str | None]:
+    """
+    Agrega las columnas normalizadas ``lat`` y ``lon`` desde columnas
+    explícitas de Operaciones. Las coordenadas no válidas se descartan.
+    """
+    lat_source = _find_coordinate_column(df, LATITUDE_COLUMN_HINTS)
+    lon_source = _find_coordinate_column(df, LONGITUDE_COLUMN_HINTS)
+
+    df["lat"] = pd.Series(float("nan"), index=df.index, dtype="float64")
+    df["lon"] = pd.Series(float("nan"), index=df.index, dtype="float64")
+
+    if lat_source is None or lon_source is None:
+        return lat_source, lon_source
+
+    df["lat"] = _to_coordinate(df[lat_source])
+    df["lon"] = _to_coordinate(df[lon_source])
+    valid = df["lat"].between(-90, 90) & df["lon"].between(-180, 180)
+    df.loc[~valid, ["lat", "lon"]] = float("nan")
+    return lat_source, lon_source
+
+
 @st.cache_data(show_spinner="Cargando tiendas vigentes...")
 def load_tiendas(_sig=None) -> pd.DataFrame:
-    sig = _file_signature(BOOK_PATH)
+    _file_signature(BOOK_PATH)
     df = pd.read_excel(BOOK_PATH, sheet_name="JUN")
     df.columns = [str(c).strip() for c in df.columns]
     keep = [c for c in TIENDAS_COLS if c in df.columns]
@@ -72,17 +132,16 @@ def load_tiendas(_sig=None) -> pd.DataFrame:
     df["NAME"] = df["NAME"].astype(str).str.strip()
     df = df[df["NAME"].ne("") & df["NAME"].ne("0")]
 
-    # X = longitud, Y = latitud en esta base
+    # X = longitud, Y = latitud en la base de tiendas.
     df["lat"] = pd.to_numeric(df["Y"], errors="coerce")
     df["lon"] = pd.to_numeric(df["X"], errors="coerce")
-
-    df = df.reset_index(drop=True)
-    return df
+    return df.reset_index(drop=True)
 
 
 @st.cache_data(show_spinner="Cargando puntos evaluados (Operaciones)...")
 def load_visitas(_sig=None) -> pd.DataFrame:
-    sig = _file_signature(VISITAS_PATH)
+    """Carga Operaciones y deja ``lat``/``lon`` listos si la base los trae."""
+    _file_signature(VISITAS_PATH)
     df = pd.read_excel(
         VISITAS_PATH, sheet_name="Visitas_Operaciones", engine="openpyxl"
     )
@@ -94,18 +153,14 @@ def load_visitas(_sig=None) -> pd.DataFrame:
         df["Nombre del Punto"] = df["Nombre del Punto"].astype(str).str.strip()
         df = df[df["Nombre del Punto"].ne("") & df["Nombre del Punto"].ne("nan")]
 
-    # --- Columna estándar de fecha, usada por el filtro de fecha en la UI.
     fecha_col = _find_date_column(df)
     if fecha_col is not None:
-        df[DATE_COLUMN_STD] = pd.to_datetime(df[fecha_col], errors="coerce")
+        df[DATE_COLUMN_STD] = pd.to_datetime(
+            df[fecha_col], errors="coerce", dayfirst=True
+        )
     else:
-        # No se encontró ninguna columna de fecha: se deja vacía y app.py
-        # ocultará el filtro automáticamente con un aviso.
         df[DATE_COLUMN_STD] = pd.NaT
 
-    # --- Columna ID, usada para marcar puntos como "Subido". Si ya existe
-    # en el Excel se normaliza a texto; si no existe, se usa el nombre del
-    # punto como identificador de respaldo.
     if "ID" in df.columns:
         df["ID"] = df["ID"].astype(str)
     elif "Nombre del Punto" in df.columns:
@@ -113,11 +168,12 @@ def load_visitas(_sig=None) -> pd.DataFrame:
     else:
         df["ID"] = df.index.astype(str)
 
-    df = df.reset_index(drop=True)
-    return df
+    lat_source, lon_source = _add_visit_coordinates(df)
+    df.attrs["coordinate_sources"] = {"latitud": lat_source, "longitud": lon_source}
+    return df.reset_index(drop=True)
 
 
 def reload_all():
-    """Fuerza recarga (botón 'Recargar datos' en la UI)."""
+    """Fuerza la recarga de los Excel desde la interfaz."""
     load_tiendas.clear()
     load_visitas.clear()
