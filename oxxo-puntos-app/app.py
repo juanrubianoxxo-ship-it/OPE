@@ -421,7 +421,8 @@ else:
         st.markdown(f'<div style="background-image: url("{str(FONDO_PATH)}"); background-size: cover; background-position: center; padding: 10px; border-radius: 10px;">', unsafe_allow_html=True)
     st.caption("Haz clic en cualquier punto del mapa para ver su información.")
 
-    # Coordenadas del punto seleccionado (extraídas del enlace de Maps por data_loader)
+    # --- Preparar datos ---
+    # Coordenadas del punto seleccionado (extraídas del enlace de Maps)
     lat = fila_visita.get("lat")
     lon = fila_visita.get("lon")
     tiene_coordenadas_punto = (
@@ -430,7 +431,24 @@ else:
     if tiene_coordenadas_punto:
         lat, lon = float(lat), float(lon)
 
-    # Inicializar variables de cercanía (siempre definidas para evitar NameError)
+    # Todos los puntos de Operaciones con coordenadas extraídas del enlace de Maps
+    puntos_operacion_mapeables = visitas_full[
+        visitas_full["lat"].notna() & visitas_full["lon"].notna()
+    ].copy()
+
+    # Puntos con Estado Growth = Subido y coordenadas
+    estado_growth_full = visitas_full.get(
+        "Estado Growth", pd.Series("", index=visitas_full.index, dtype=object)
+    ).fillna("").astype(str).str.strip().str.casefold()
+    mascara_subido_full = estado_growth_full.eq("subido")
+    operaciones_growth_subidas = visitas_full[
+        mascara_subido_full & visitas_full["lat"].notna() & visitas_full["lon"].notna()
+    ].copy()
+
+    # Todas las tiendas abiertas (para el mapa y cercanía)
+    tiendas_abiertas = tiendas[tiendas["ESTADO"] == "ABIERTA"]
+
+    # Cercanía a 300m del punto seleccionado
     tiendas_cercanas = pd.DataFrame()
     puntos_potenciales_cercanos = pd.DataFrame()
     filas_cercania = []
@@ -445,27 +463,14 @@ else:
             lat, lon, radio_m=radio_cercania_m, df_pp=puntos_potenciales,
         )
 
-    # --- Capa de puntos con Estado Growth = Subido (coordenadas de Maps) ---
-    # Siempre usar visitas_full para que no dependa del filtro
-    estado_growth_full = visitas_full.get(
-        "Estado Growth", pd.Series("", index=visitas_full.index, dtype=object)
-    ).fillna("").astype(str).str.strip().str.casefold()
-    mascara_subido_full = estado_growth_full.eq("subido")
-    operaciones_growth_subidas = visitas_full[
-        mascara_subido_full & visitas_full["lat"].notna() & visitas_full["lon"].notna()
-    ].copy()
-
-    # Todas las tiendas abiertas
-    tiendas_abiertas = tiendas[tiendas["ESTADO"] == "ABIERTA"]
-
-    # Determinar el centro del mapa
+    # --- Determinar centro del mapa ---
     if tiene_coordenadas_punto:
         centro_mapa = [lat, lon]
         zoom_inicial = 15
-    elif not operaciones_growth_subidas.empty:
+    elif not puntos_operacion_mapeables.empty:
         centro_mapa = [
-            float(operaciones_growth_subidas["lat"].mean()),
-            float(operaciones_growth_subidas["lon"].mean()),
+            float(puntos_operacion_mapeables["lat"].mean()),
+            float(puntos_operacion_mapeables["lon"].mean()),
         ]
         zoom_inicial = 8
     elif not puntos_potenciales.empty:
@@ -474,6 +479,12 @@ else:
             float(puntos_potenciales["lon"].mean()),
         ]
         zoom_inicial = 5
+    elif not tiendas_abiertas.empty:
+        centro_mapa = [
+            float(tiendas_abiertas["lat"].mean()),
+            float(tiendas_abiertas["lon"].mean()),
+        ]
+        zoom_inicial = 6
     else:
         centro_mapa = None
         zoom_inicial = 6
@@ -483,8 +494,9 @@ else:
         capa_tiendas = folium.FeatureGroup(name="Tiendas abiertas")
         capa_iso = folium.FeatureGroup(name="Puntos potenciales ISO")
         capa_growth = folium.FeatureGroup(name="Operaciones Subidas")
+        capa_ops = folium.FeatureGroup(name="Operaciones (todos)")
 
-        # --- Punto evaluado (selección actual) ---
+        # --- 1. Punto evaluado (selección actual) ---
         if tiene_coordenadas_punto:
             st.success(
                 f"✅ Coordenadas extraídas del Maps · lat: {lat:.6f}, lon: {lon:.6f}."
@@ -507,6 +519,7 @@ else:
                 icon=custom_icon,
             ).add_to(m)
 
+            # Tiendas cercanas a 300m del punto seleccionado
             for _, tienda in tiendas_cercanas.iterrows():
                 popup_tienda = folium.Popup(
                     "<b>🟠 " + html.escape(str(tienda.get("NAME", ""))) + "</b><br>"
@@ -520,18 +533,42 @@ else:
                     icon=folium.Icon(color="orange", icon="shopping-cart"),
                 ).add_to(capa_tiendas)
 
-        # --- Capa de puntos Subidos (coordenadas del enlace de Maps) ---
-        for _, punto_subido in operaciones_growth_subidas.iterrows():
-            nombre_subido = html.escape(str(punto_subido.get("Nombre del Punto", "")))
-            direccion_subido = html.escape(str(punto_subido.get("Dirección", "")))
-            lat_subido = float(punto_subido["lat"])
-            lon_subido = float(punto_subido["lon"])
-            popup_subido = folium.Popup(
-                f"<b>🔴 {nombre_subido}</b><br>Dirección: {direccion_subido}",
+        # --- 2. Todos los puntos de Operaciones (excepto el seleccionado) ---
+        for _, punto_op in puntos_operacion_mapeables.iterrows():
+            # Saltar el punto seleccionado (ya está como estrella)
+            if tiene_coordenadas_punto and str(punto_op.get("ID", "")) == id_punto:
+                continue
+            nombre_op = html.escape(str(punto_op.get("Nombre del Punto", "")))
+            direccion_op = html.escape(str(punto_op.get("Dirección", "")))
+            estado_growth_val = html.escape(str(punto_op.get("Estado Growth", "")))
+            popup_op = folium.Popup(
+                f"<b>⚫ {nombre_op}</b><br>Estado Growth: {estado_growth_val}<br>Dirección: {direccion_op}",
                 max_width=300,
             )
             folium.CircleMarker(
-                [lat_subido, lon_subido],
+                [float(punto_op["lat"]), float(punto_op["lon"])],
+                radius=5,
+                popup=popup_op,
+                color="#555555",
+                weight=1,
+                fill=True,
+                fill_color="#888888",
+                fill_opacity=0.7,
+            ).add_to(capa_ops)
+
+        # --- 3. Puntos Subidos (destacados en rojo) ---
+        for _, punto_subido in operaciones_growth_subidas.iterrows():
+            # Si es el punto seleccionado, ya está como estrella
+            if tiene_coordenadas_punto and str(punto_subido.get("ID", "")) == id_punto:
+                continue
+            nombre_subido = html.escape(str(punto_subido.get("Nombre del Punto", "")))
+            direccion_subido = html.escape(str(punto_subido.get("Dirección", "")))
+            popup_subido = folium.Popup(
+                f"<b>🔴 {nombre_subido}</b><br>Estado Growth: Subido<br>Dirección: {direccion_subido}",
+                max_width=300,
+            )
+            folium.CircleMarker(
+                [float(punto_subido["lat"]), float(punto_subido["lon"])],
                 radius=7,
                 popup=popup_subido,
                 color="#B4022A",
@@ -541,15 +578,19 @@ else:
                 fill_opacity=0.9,
             ).add_to(capa_growth)
 
+        capa_ops.add_to(m)
         capa_tiendas.add_to(m)
         capa_iso.add_to(m)
         capa_growth.add_to(m)
         folium.LayerControl(collapsed=True).add_to(m)
 
+        n_ops_en_mapa = len(puntos_operacion_mapeables) - (1 if tiene_coordenadas_punto and id_punto in puntos_operacion_mapeables["ID"].astype(str).tolist() else 0)
+        n_subidos_en_mapa = len(operaciones_growth_subidas) - (1 if tiene_coordenadas_punto and id_punto in operaciones_growth_subidas["ID"].astype(str).tolist() else 0)
         st.caption(
-            f"🔵 Punto evaluado (selección) · 🟠 Tiendas abiertas · "
-            f"🟣 Puntos potenciales (ISO) · 🔴 Operaciones Subidas ({len(operaciones_growth_subidas)} en el mapa). "
-            f"Usa el control superior derecho para ocultar capas."
+            f"🔵 Punto evaluado (selección) · ⚫ Operaciones ({n_ops_en_mapa} puntos) · "
+            f"🔴 Operaciones Subidas ({n_subidos_en_mapa} en el mapa) · "
+            f"🟠 Tiendas cercanas a {radio_cercania_m}m ({len(tiendas_cercanas)}) · "
+            f"🟣 Puntos potenciales ISO. Usa el control superior derecho para ocultar capas."
         )
         st_folium(m, use_container_width=True, height=500, returned_objects=[])
         if FONDO_PATH.exists():
