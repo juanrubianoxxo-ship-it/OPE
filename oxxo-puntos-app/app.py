@@ -250,12 +250,21 @@ with st.sidebar:
     tiene_fechas = visitas_full[DATE_COLUMN_STD].notna().any()
     rango_fecha = None
     if tiene_fechas:
-        fecha_min = visitas_full[DATE_COLUMN_STD].min().date()
+        # Ampliamos el rango por defecto para asegurar que se muestren todos los puntos nuevos
+        # desde el inicio del año 2025 hasta la fecha máxima registrada en la base.
+        import datetime
+        fecha_min_historica = datetime.date(2025, 1, 1)
         fecha_max = visitas_full[DATE_COLUMN_STD].max().date()
+        
+        # Ajustamos el mínimo para que coincida con el mínimo real de la base si es mayor a 2025
+        min_real = visitas_full[DATE_COLUMN_STD].min().date()
+        if min_real > fecha_min_historica:
+            fecha_min_historica = min_real
+            
         rango_fecha = st.date_input(
             "Ver puntos evaluados entre estas fechas",
-            value=(fecha_min, fecha_max),
-            min_value=fecha_min,
+            value=(fecha_min_historica, fecha_max),
+            min_value=fecha_min_historica,
             max_value=fecha_max,
         )
     else:
