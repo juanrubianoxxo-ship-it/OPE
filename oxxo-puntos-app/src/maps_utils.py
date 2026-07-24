@@ -5,9 +5,10 @@ jefes de zona en el formulario, con estrategia en cascada:
 1. Parsear el link directamente (si ya trae lat/lng en la URL).
 2. Si es un link acortado (maps.app.goo.gl, goo.gl/maps), resolver la
    redirección y volver a intentar el paso 1 sobre la URL final.
-3. Si no se pudo (p.ej. el link es de Bing Maps u otro buscador sin
-   coordenadas), usar la dirección para geocodificar con Nominatim
-   (OpenStreetMap, gratis) como respaldo.
+3. Extraer coordenadas de Bing Maps (ppois= y cp=).
+4. Usar columnas Y (lat) y X (lon) de la base como respaldo directo.
+5. Si no se pudo, usar la dirección para geocodificar con Nominatim
+   (OpenStreetMap, gratis) como último recurso.
 
 Todo queda cacheado con st.cache_data para no golpear la red en cada rerun.
 """
@@ -19,18 +20,36 @@ USER_AGENT = "oxxo-puntos-app/1.0 (contacto: equipo-expansion@oxxo.com)"
 
 # Patrones típicos dentro de URLs de Google Maps
 PATTERNS = [
-    r"@(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)",          # .../@4.7101,-74.0721,15z
-    r"!3d(-?\d{1,3}\.\d+)!4d(-?\d{1,3}\.\d+)",       # pin exacto de un lugar
-    r"[?&]q=(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)",      # ?q=4.71,-74.07
-    r"[?&]ll=(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)",     # ?ll=4.71,-74.07
-    r"[?&]destination=(-?\d{1,3}\.\d+),(-?\d{1,3}\.\d+)",
+    r"@(-?\d+\.\d+),(-?\d+\.\d+)",                   # .../@4.7101,-74.0721,15z
+    r"!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)",               # pin exacto de un lugar
+    r"[?&]q=(-?\d+\.\d+),(-?\d+\.\d+)",              # ?q=4.71,-74.07 (formato redirect)
+    r"[?&]ll=(-?\d+\.\d+),(-?\d+\.\d+)",             # ?ll=4.71,-74.07
+    r"[?&]destination=(-?\d+\.\d+),(-?\d+\.\d+)",    # direcciones
+]
+
+# Patrones para Bing Maps
+BING_PATTERNS = [
+    r"ppois=([0-9]+\.\d+)_(-[0-9]+\.\d+)_",          # ppois=7.0705_-73.1061_nombre
+    r"cp=([0-9]+\.\d+)%7E(-[0-9]+\.\d+)",            # cp=7.0705%7E-73.1061
 ]
 
 SHORT_LINK_DOMAINS = ("maps.app.goo.gl", "goo.gl/maps", "goo.gl")
 
 
 def _parse_coords_from_text(url: str):
+    """Intenta extraer coordenadas de una URL usando los patrones de Google Maps."""
     for pattern in PATTERNS:
+        m = re.search(pattern, url)
+        if m:
+            lat, lon = float(m.group(1)), float(m.group(2))
+            if -90 <= lat <= 90 and -180 <= lon <= 180:
+                return lat, lon
+    return None
+
+
+def _parse_bing_coords(url: str):
+    """Intenta extraer coordenadas de una URL de Bing Maps."""
+    for pattern in BING_PATTERNS:
         m = re.search(pattern, url)
         if m:
             lat, lon = float(m.group(1)), float(m.group(2))
@@ -43,8 +62,8 @@ def _is_short_link(url: str) -> bool:
     return any(d in url for d in SHORT_LINK_DOMAINS)
 
 
-def _is_google_maps(url: str) -> bool:
-    return "google.com/maps" in url or "goo.gl" in url or "maps.app.goo.gl" in url
+def _is_bing_maps(url: str) -> bool:
+    return "bing.com/maps" in url
 
 
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
@@ -62,7 +81,7 @@ def resolve_short_link(url: str) -> str:
 @st.cache_data(show_spinner=False, ttl=60 * 60 * 24)
 def geocode_address(address: str, region_hint: str = "Colombia"):
     """Respaldo gratuito vía Nominatim (OpenStreetMap) cuando el link no
-    trae coordenadas (ej. búsquedas de Bing Maps sin lat/lng en la URL)."""
+    trae coordenadas."""
     if not address or not address.strip():
         return None
     try:
@@ -88,30 +107,42 @@ def get_coordinates(maps_link: str, address: str = ""):
     link = (maps_link or "").strip()
 
     if not link:
-        coords = geocode_address(address)
-        if coords:
-            return coords[0], coords[1], "Geocodificado por dirección (sin link)"
+        if address and address.strip():
+            coords = geocode_address(address)
+            if coords:
+                return coords[0], coords[1], "Geocodificado por dirección (sin link)"
         return None, None, "Sin link ni dirección utilizable"
 
-    # 1. Intento directo sobre el link tal cual
+    # 1. Intento directo sobre el link tal cual (Google Maps patterns)
     coords = _parse_coords_from_text(link)
     if coords:
         return coords[0], coords[1], "Extraído directamente del link"
 
-    # 2. Si es link acortado, resolver redirección y reintentar
+    # 2. Intentar con patrones de Bing Maps
+    if _is_bing_maps(link):
+        coords = _parse_bing_coords(link)
+        if coords:
+            return coords[0], coords[1], "Extraído de Bing Maps"
+
+    # 3. Si es link acortado, resolver redirección y reintentar
     if _is_short_link(link):
         final_url = resolve_short_link(link)
         coords = _parse_coords_from_text(final_url)
         if coords:
             return coords[0], coords[1], "Extraído tras resolver el link corto"
+        # También intentar Bing patterns en la URL final
+        coords = _parse_bing_coords(final_url)
+        if coords:
+            return coords[0], coords[1], "Extraído tras resolver el link corto (Bing)"
 
-    # 3. Respaldo: geocodificar por dirección
-    coords = geocode_address(address)
-    if coords:
-        motivo = (
-            "Geocodificado por dirección (el link no traía coordenadas, "
-            "p. ej. búsqueda de Bing Maps)"
-        )
-        return coords[0], coords[1], motivo
+    # 4. Respaldo: geocodificar por dirección
+    if address and address.strip():
+        coords = geocode_address(address)
+        if coords:
+            motivo = (
+                "Geocodificado por dirección (el link no traía coordenadas, "
+                "p. ej. búsqueda de Bing Maps)"
+            )
+            return coords[0], coords[1], motivo
 
     return None, None, "No se pudieron obtener coordenadas (ni del link ni de la dirección)"
