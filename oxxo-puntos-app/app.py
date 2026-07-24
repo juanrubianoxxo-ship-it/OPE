@@ -16,8 +16,6 @@ from src.pdf_report import generar_informe_pdf
 import os
 from pathlib import Path
 
-# ========== NUEVO: Import para calendario visual ==========
-import datetime as dt
 
 ASSETS_DIR = Path("src/assets")
 LOGO_PATH = ASSETS_DIR / "logo_oxxo_simil.png"
@@ -245,176 +243,8 @@ operaciones_growth_subidas = visitas_full[
 ].copy()
 n_growth_subidos_sin_coordenadas = int((mascara_growth_subido & ~mascara_coords_operaciones).sum())
 
-# --------------------------------------------- Filtros nuevos (sidebar) ---
+# --------------------------------------------- Filtros (sidebar) ---
 with st.sidebar:
-    st.divider()
-    st.subheader("📅 Filtro por fecha")
-
-    tiene_fechas = visitas_full[DATE_COLUMN_STD].notna().any()
-
-    # Variables de filtrado
-    rango_fecha = None
-    fecha_unica = None
-    fecha_unica_seleccionada = False
-
-    if tiene_fechas:
-        import datetime
-        fecha_min_historica = datetime.date(2025, 1, 1)
-        fecha_max = visitas_full[DATE_COLUMN_STD].max().date()
-        
-        # Ajustamos el mínimo para que coincida con el mínimo real de la base si es mayor a 2025
-        min_real = visitas_full[DATE_COLUMN_STD].min().date()
-        if min_real > fecha_min_historica:
-            fecha_min_historica = min_real
-
-        # ---------- Selector de modo ----------
-        modo_filtro = st.radio(
-            "Modo de filtrado",
-            options=["📆 Calendario visual", "🔢 Rango manual", "📌 Un día específico"],
-            index=0,
-            horizontal=False,
-        )
-
-        # ============================================
-        # OPCIÓN A: Calendario visual (FullCalendar)
-        # Solo se renderiza si el usuario elige esta opción
-        # ============================================
-        if modo_filtro == "📆 Calendario visual":
-            from streamlit_calendar import calendar
-            st.caption("Haz clic en un día para ver sus proyectos. Arrastra para seleccionar un rango.")
-
-            # Construir eventos del calendario de forma vectorizada (mucho más rápido)
-            fechas_validas = visitas_full[visitas_full[DATE_COLUMN_STD].notna()].copy()
-            fechas_validas["fecha_str"] = fechas_validas[DATE_COLUMN_STD].dt.strftime("%Y-%m-%d")
-            conteo_proyectos = fechas_validas.groupby("fecha_str").size()
-
-            calendar_events = [
-                {
-                    "title": f"{n} proy.",
-                    "start": fecha,
-                    "allDay": True,
-                    "backgroundColor": OXXO_ROJO,
-                    "borderColor": OXXO_ROJO_OSCURO,
-                    "textColor": OXXO_BLANCO,
-                }
-                for fecha, n in conteo_proyectos.items()
-            ]
-
-            calendar_options = {
-                "selectable": True,
-                "editable": False,
-                "headerToolbar": {
-                    "left": "today prev,next",
-                    "center": "title",
-                    "right": "dayGridMonth,dayGridWeek,dayGridDay",
-                },
-                "initialView": "dayGridMonth",
-                "locale": "es",
-                "firstDay": 1,
-                "height": "auto",
-                "dayMaxEvents": 3,
-                "moreLinkClick": "day",
-            }
-
-            custom_css_cal = f"""
-                .fc-event-past {{
-                    opacity: 0.85;
-                }}
-                .fc-event-title {{
-                    font-weight: 700;
-                    font-size: 0.85em;
-                }}
-                .fc-toolbar-title {{
-                    font-size: 1.2rem;
-                }}
-                .fc-daygrid-day-number {{
-                    font-weight: 600;
-                }}
-                .fc-daygrid-day.fc-day-today {{
-                    background-color: rgba(228, 3, 46, 0.08);
-                }}
-            """
-
-            cal = calendar(
-                events=calendar_events,
-                options=calendar_options,
-                custom_css=custom_css_cal,
-                key="calendar_fechas_proyectos",
-            )
-
-            # Procesar la selección del calendario
-            if cal:
-                callback = cal.get("callback")
-                if callback == "select":
-                    select_data = cal.get("select", {})
-                    start_str = select_data.get("start")
-                    end_str = select_data.get("end")
-                    if start_str:
-                        start_date = dt.datetime.strptime(start_str[:10], "%Y-%m-%d").date()
-                        end_date = dt.datetime.strptime(end_str[:10], "%Y-%m-%d").date()
-                        if start_date == end_date:
-                            fecha_unica = start_date
-                            fecha_unica_seleccionada = True
-                            st.success(f"Día seleccionado: **{start_date.strftime('%d/%m/%Y')}**")
-                        else:
-                            rango_fecha = (start_date, end_date)
-                            st.success(f"Rango: **{start_date.strftime('%d/%m/%Y')}** a **{end_date.strftime('%d/%m/%Y')}**")
-
-                elif callback == "dateClick":
-                    click_data = cal.get("dateClick", {})
-                    date_str = click_data.get("date")
-                    if date_str:
-                        fecha_unica = dt.datetime.strptime(date_str[:10], "%Y-%m-%d").date()
-                        fecha_unica_seleccionada = True
-                        st.success(f"Día seleccionado: **{fecha_unica.strftime('%d/%m/%Y')}**")
-
-                elif callback == "eventClick":
-                    event_data = cal.get("eventClick", {}).get("event", {})
-                    start_str = event_data.get("start")
-                    if start_str:
-                        fecha_unica = dt.datetime.strptime(start_str[:10], "%Y-%m-%d").date()
-                        fecha_unica_seleccionada = True
-                        st.success(f"Día seleccionado: **{fecha_unica.strftime('%d/%m/%Y')}**")
-
-            if st.button("🗑️ Limpiar selección", use_container_width=True):
-                st.session_state.pop("calendar_fechas_proyectos", None)
-                st.rerun()
-
-        # ============================================
-        # OPCIÓN B: Rango manual con date_input (rápido, sin calendario)
-        # ============================================
-        elif modo_filtro == "🔢 Rango manual":
-            rango_fecha = st.date_input(
-                "Selecciona el rango de fechas",
-                value=(fecha_min_historica, fecha_max),
-                min_value=fecha_min_historica,
-                max_value=fecha_max,
-            )
-
-        # ============================================
-        # OPCIÓN C: Un día específico (solo date_input, rápido)
-        # ============================================
-        elif modo_filtro == "📌 Un día específico":
-            fecha_unica = st.date_input(
-                "Selecciona el día",
-                value=fecha_max,
-                min_value=fecha_min_historica,
-                max_value=fecha_max,
-            )
-            if fecha_unica:
-                fecha_unica_seleccionada = True
-                # Mostrar cuántos proyectos hay ese día
-                conteo_dia = int((
-                    visitas_full[DATE_COLUMN_STD].dt.date == fecha_unica
-                ).sum())
-                st.caption(f"Hay **{conteo_dia} proyecto(s)** el {fecha_unica.strftime('%d/%m/%Y')}.")
-
-    else:
-        st.caption(
-            "No se detectó una columna de fecha en 'Visitas_Operaciones' "
-            "(busco alguna columna cuyo nombre contenga 'fecha')."
-        )
-
     st.divider()
     mostrar_subidos = st.checkbox(
         "Mostrar también los puntos ya marcados como 'Subido'",
@@ -429,27 +259,6 @@ with st.sidebar:
 
 # ---------------------------------------------------- Aplicar filtros -----
 visitas = visitas_full.copy()
-
-n_sin_fecha_excluidos = 0
-
-# Filtro por rango de fechas
-if rango_fecha and isinstance(rango_fecha, tuple) and len(rango_fecha) == 2:
-    inicio, fin = rango_fecha
-    con_fecha = visitas[DATE_COLUMN_STD].notna()
-    en_rango = (visitas[DATE_COLUMN_STD].dt.date >= inicio) & (visitas[DATE_COLUMN_STD].dt.date <= fin)
-    n_sin_fecha_excluidos = int((~con_fecha).sum())
-    visitas = visitas[con_fecha & en_rango]
-
-# Filtro por fecha única (seleccionada del calendario)
-elif fecha_unica_seleccionada and fecha_unica is not None:
-    con_fecha = visitas[DATE_COLUMN_STD].notna()
-    en_fecha = visitas[DATE_COLUMN_STD].dt.date == fecha_unica
-    n_sin_fecha_excluidos = int((~con_fecha).sum())
-    visitas = visitas[con_fecha & en_fecha]
-
-# Sin filtro de fecha: mostrar todos
-else:
-    n_sin_fecha_excluidos = 0
 
 n_subidos_ocultos = 0
 if not mostrar_subidos:
@@ -471,18 +280,11 @@ if page == "🔍 Comparación de nombres":
         f"{len(visitas)} puntos evaluados · {len(tiendas)} tiendas "
         "ABIERTA / OBRA / FIRMADA en la base."
     )
-    if n_sin_fecha_excluidos and (rango_fecha or fecha_unica_seleccionada):
-        st.caption(
-            f"⚠️ {n_sin_fecha_excluidos} punto(s) sin fecha registrada se "
-            "excluyeron por el filtro de fecha."
-        )
     if n_subidos_ocultos:
         st.caption(
             f"👁️ {n_subidos_ocultos} punto(s) ya marcados como 'Subido' "
             "están ocultos (activa la casilla en la barra lateral para verlos)."
         )
-    if not rango_fecha and not fecha_unica_seleccionada:
-        st.caption(f"📋 Mostrando **todos** los {len(visitas)} proyectos (sin filtro de fecha activo).")
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Puntos evaluados", len(match_table))
