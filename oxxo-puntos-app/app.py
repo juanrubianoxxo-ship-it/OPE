@@ -578,6 +578,28 @@ else:
                 fill_opacity=0.9,
             ).add_to(capa_growth)
 
+        # --- 4. Puntos potenciales ISO ---
+        if not puntos_potenciales.empty:
+            for _, punto_iso in puntos_potenciales.iterrows():
+                popup_iso = folium.Popup(
+                    "<b>🟣 " + html.escape(str(punto_iso.get("Nombre PP", ""))) + "</b><br>"
+                    "ISO: " + html.escape(str(punto_iso.get("ISO", ""))) + "<br>"
+                    "Estado: " + html.escape(str(punto_iso.get("Estado", ""))) + "<br>"
+                    "Ciudad: " + html.escape(str(punto_iso.get("Ciudad", ""))) + "<br>"
+                    "Especialista: " + html.escape(str(punto_iso.get("ESPECIALISTA", ""))),
+                    max_width=300,
+                )
+                folium.CircleMarker(
+                    [float(punto_iso["lat"]), float(punto_iso["lon"])],
+                    radius=5,
+                    popup=popup_iso,
+                    color="#7B2D8E",
+                    weight=1,
+                    fill=True,
+                    fill_color="#9B4DCA",
+                    fill_opacity=0.7,
+                ).add_to(capa_iso)
+
         capa_ops.add_to(m)
         capa_tiendas.add_to(m)
         capa_iso.add_to(m)
