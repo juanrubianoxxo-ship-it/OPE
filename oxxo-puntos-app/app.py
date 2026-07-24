@@ -1,11 +1,12 @@
 import streamlit as st
+import html
+
 import pandas as pd
 import folium
 from streamlit_folium import st_folium
 
 from src.data_loader import load_tiendas, load_visitas, reload_all, DATE_COLUMN_STD
 from src.matching import build_match_table
-from src.maps_utils import get_coordinates
 from src.photos_utils import parse_photo_urls
 from src.estado_subido import obtener_subidos, marcar_subido, desmarcar_subido
 from src.geo_utils import buscar_cercanos
@@ -181,9 +182,9 @@ with st.sidebar:
         min_value=50, max_value=1000, value=300, step=25,
     )
     st.caption(
-        "Este radio solo aplica a la tabla de cercanía de **tiendas "
-        "abiertas**. En el mapa se muestran **todos** los puntos "
-        "potenciales, sin importar la distancia."
+        "Este radio aplica a la tabla de cercanía y al Top 5 del informe. "
+        "En el mapa se muestran todos los puntos ISO y los registros "
+        "de Operaciones con Estado Growth = Subido que tengan coordenadas."
     )
 
     st.divider()
@@ -212,6 +213,19 @@ if visitas_full.empty:
     st.stop()
 
 subidos_ids = obtener_subidos()
+
+# Capa independiente de la marcación manual: toma directamente el valor de
+# la columna Estado Growth de la base de Operaciones y solo usa coordenadas
+# explícitas presentes en esa misma hoja.
+estado_growth = visitas_full.get(
+    "Estado Growth", pd.Series("", index=visitas_full.index, dtype=object)
+).fillna("").astype(str).str.strip().str.casefold()
+mascara_growth_subido = estado_growth.eq("subido")
+mascara_coords_operaciones = visitas_full["lat"].notna() & visitas_full["lon"].notna()
+operaciones_growth_subidas = visitas_full[
+    mascara_growth_subido & mascara_coords_operaciones
+].copy()
+n_growth_subidos_sin_coordenadas = int((mascara_growth_subido & ~mascara_coords_operaciones).sum())
 
 # --------------------------------------------- Filtros nuevos (sidebar) ---
 with st.sidebar:
@@ -243,9 +257,8 @@ with st.sidebar:
 
     if puntos_potenciales.empty:
         st.caption(
-            "⚠️ No encontré `data/Puntos_Potenciales.xlsx` (o la hoja "
-            "'MS26' vino vacía). Súbelo al repo para activar los puntos "
-            "potenciales en el mapa."
+            "⚠️ No encontré puntos con coordenadas válidas en "
+            "`data/Puntos_Potenciales.xlsx`, hoja `ISO`."
         )
 
 # ---------------------------------------------------- Aplicar filtros -----
@@ -405,8 +418,12 @@ else:
         st.subheader("Fotos del local")
         fotos = parse_photo_urls(fila_visita.get("Fotos del Local Revisado", ""))
         if fotos:
-            for url in fotos:
-                st.image(url, use_container_width=True)
+            # Dos columnas mantienen una lectura ordenada sin alterar el
+            # orden original de las imágenes en la base de Operaciones.
+            columnas_fotos = st.columns(2)
+            for indice, url in enumerate(fotos, start=1):
+                with columnas_fotos[(indice - 1) % 2]:
+                    st.image(url, caption=f"Foto {indice}", use_container_width=True)
         else:
             st.info("Este punto no tiene fotos cargadas.")
 
@@ -414,109 +431,189 @@ else:
     st.subheader("Ubicación en el mapa")
     st.caption("Haz clic en cualquier punto del mapa para ver su información.")
 
-    direccion = fila_visita.get("Dirección", "")
-    lat, lon, fuente = get_coordinates(maps_link, direccion)
+    # La ubicación del punto se toma exclusivamente de columnas explícitas
+    # de latitud y longitud en Visitas_Operaciones. El enlace de Maps queda
+    # disponible arriba como consulta, pero nunca se usa para geolocalizar.
+    lat = fila_visita.get("lat")
+    lon = fila_visita.get("lon")
+    tiene_coordenadas_punto = (
+        lat is not None and lon is not None and pd.notna(lat) and pd.notna(lon)
+    )
+    if tiene_coordenadas_punto:
+        lat, lon = float(lat), float(lon)
 
     tiendas_cercanas = pd.DataFrame()
     puntos_potenciales_cercanos = pd.DataFrame()
 
-    if lat is not None:
-        st.caption(f"Coordenadas obtenidas — {fuente} · lat: {lat:.6f}, lon: {lon:.6f}")
+    # Si el punto seleccionado no cuenta con coordenadas, la capa de Subidos
+    # todavía puede consultarse cuando existan registros georreferenciados.
+    hay_subidos_mapeables = not operaciones_growth_subidas.empty
+    if tiene_coordenadas_punto:
+        centro_mapa = [lat, lon]
+        zoom_inicial = 15
+    elif hay_subidos_mapeables:
+        centro_mapa = [
+            float(operaciones_growth_subidas["lat"].mean()),
+            float(operaciones_growth_subidas["lon"].mean()),
+        ]
+        zoom_inicial = 6
+    elif not puntos_potenciales.empty:
+        # Conserva la consulta de ISO aunque la fila de Operaciones aún no
+        # tenga latitud y longitud diligenciadas.
+        centro_mapa = [
+            float(puntos_potenciales["lat"].mean()),
+            float(puntos_potenciales["lon"].mean()),
+        ]
+        zoom_inicial = 5
+    else:
+        centro_mapa = None
+        zoom_inicial = 6
 
-        m = folium.Map(location=[lat, lon], zoom_start=15)
+    if centro_mapa is not None:
+        m = folium.Map(location=centro_mapa, zoom_start=zoom_inicial)
+        capa_tiendas = folium.FeatureGroup(name="Tiendas abiertas cercanas")
+        capa_iso = folium.FeatureGroup(name="Puntos potenciales ISO")
+        capa_growth = folium.FeatureGroup(name="Operaciones · Estado Growth Subido")
 
-        # ---- Punto evaluado (el que estás revisando) --------------------
-        popup_evaluado = folium.Popup(
-            f"<b>📍 {seleccion}</b><br>"
-            f"Jefe de zona: {fila_visita.get('Jefe de zona', '')}<br>"
-            f"Estado visita: {fila_visita.get('Estado', '')}<br>"
-            f"Dirección: {fila_visita.get('Dirección', '')}",
-            max_width=300,
-        )
-        folium.Marker(
-            [lat, lon],
-            popup=popup_evaluado,
-            icon=folium.Icon(color="blue", icon="star"),
-        ).add_to(m)
-
-        # -------------------------------------- Tiendas cercanas (radio) --
-        # `tiendas` (load_tiendas) ya viene filtrada a ABIERTA/OBRA/FIRMADA;
-        # aquí nos quedamos solo con ABIERTA, que es lo que pediste.
-        tiendas_abiertas = tiendas[tiendas["ESTADO"] == "ABIERTA"]
-        tiendas_cercanas = buscar_cercanos(
-            lat, lon, tiendas_abiertas, lat_col="lat", lon_col="lon", radio_m=radio_cercania_m
-        )
-        for _, t in tiendas_cercanas.iterrows():
-            popup_tienda = folium.Popup(
-                f"<b>🟠 {t.get('NAME', '')}</b><br>"
-                f"Estado: {t.get('ESTADO', '')}<br>"
-                f"Plaza 2026: {t.get('PLAZA 2026', '')}<br>"
-                f"Municipio: {t.get('MUNICIPIO', '')}<br>"
-                f"Distancia: {round(t.get('distancia_m', 0))} m",
+        if tiene_coordenadas_punto:
+            st.caption(
+                f"Coordenadas de Operaciones · lat: {lat:.6f}, lon: {lon:.6f}. "
+                "No se usó el enlace de Maps para ubicar el punto."
+            )
+            popup_evaluado = folium.Popup(
+                "<b>📍 " + html.escape(str(seleccion)) + "</b><br>"
+                "Jefe de zona: " + html.escape(str(fila_visita.get("Jefe de zona", ""))) + "<br>"
+                "Estado visita: " + html.escape(str(fila_visita.get("Estado", ""))) + "<br>"
+                "Dirección: " + html.escape(str(fila_visita.get("Dirección", ""))),
                 max_width=300,
             )
             folium.Marker(
-                [t["lat"], t["lon"]],
-                popup=popup_tienda,
-                icon=folium.Icon(color="orange", icon="shopping-cart"),
+                [lat, lon],
+                popup=popup_evaluado,
+                icon=folium.Icon(color="blue", icon="star"),
             ).add_to(m)
 
-        # ------------------------- TODOS los puntos potenciales (sin radio) --
-        if not puntos_potenciales.empty:
-            for _, p in puntos_potenciales.iterrows():
-                if pd.isna(p.get("lat")) or pd.isna(p.get("lon")):
-                    continue
-                popup_pp = folium.Popup(
-                    f"<b>🟣 {p.get('Nombre PP', '')}</b><br>"
-                    f"Estado: {p.get('Estado', '')}<br>"
-                    f"Región: {p.get('Region', '')}<br>"
-                    f"UPZ: {p.get('UPZ', '')}<br>"
-                    f"Riesgo: {p.get('Riesgo', '')}",
+            # Solo se consideran tiendas ABIERTAS y se conservan ordenadas
+            # por distancia para la tabla y el Top 5 del informe PDF.
+            tiendas_abiertas = tiendas[tiendas["ESTADO"] == "ABIERTA"]
+            tiendas_cercanas = buscar_cercanos(
+                lat, lon, tiendas_abiertas,
+                lat_col="lat", lon_col="lon", radio_m=radio_cercania_m,
+            )
+            for _, tienda in tiendas_cercanas.iterrows():
+                popup_tienda = folium.Popup(
+                    "<b>🟠 " + html.escape(str(tienda.get("NAME", ""))) + "</b><br>"
+                    "Estado: " + html.escape(str(tienda.get("ESTADO", ""))) + "<br>"
+                    "Plaza 2026: " + html.escape(str(tienda.get("PLAZA 2026", ""))) + "<br>"
+                    "Municipio: " + html.escape(str(tienda.get("MUNICIPIO", ""))) + "<br>"
+                    f"Distancia: {round(tienda.get('distancia_m', 0))} m",
                     max_width=300,
                 )
                 folium.Marker(
-                    [p["lat"], p["lon"]],
-                    popup=popup_pp,
-                    icon=folium.Icon(color="purple", icon="flag"),
-                ).add_to(m)
+                    [tienda["lat"], tienda["lon"]],
+                    popup=popup_tienda,
+                    icon=folium.Icon(color="orange", icon="shopping-cart"),
+                ).add_to(capa_tiendas)
 
-            # Para la tabla de cercanía (texto) sí seguimos usando el radio
-            puntos_potenciales_cercanos = buscar_puntos_potenciales_cercanos(
-                lat, lon, radio_m=radio_cercania_m, df_pp=puntos_potenciales
+        # Todos los puntos de la hoja ISO se conservan visibles en el mapa;
+        # la tabla de cercanía, en cambio, aplica el radio seleccionado.
+        if not puntos_potenciales.empty:
+            for _, punto_iso in puntos_potenciales.iterrows():
+                popup_iso = folium.Popup(
+                    "<b>🟣 " + html.escape(str(punto_iso.get("Nombre PP", ""))) + "</b><br>"
+                    "ISO: " + html.escape(str(punto_iso.get("ISO", ""))) + "<br>"
+                    "Estado: " + html.escape(str(punto_iso.get("Estado", ""))) + "<br>"
+                    "Ciudad: " + html.escape(str(punto_iso.get("Ciudad", ""))) + "<br>"
+                    "Especialista: " + html.escape(str(punto_iso.get("ESPECIALISTA", ""))),
+                    max_width=300,
+                )
+                folium.Marker(
+                    [punto_iso["lat"], punto_iso["lon"]],
+                    popup=popup_iso,
+                    icon=folium.Icon(color="purple", icon="flag"),
+                ).add_to(capa_iso)
+
+            if tiene_coordenadas_punto:
+                puntos_potenciales_cercanos = buscar_puntos_potenciales_cercanos(
+                    lat, lon, radio_m=radio_cercania_m, df_pp=puntos_potenciales,
+                )
+
+        # Capa solicitada: datos directamente de Operaciones cuyo Estado
+        # Growth es Subido y que cuentan con latitud/longitud explícitas.
+        for _, punto_subido in operaciones_growth_subidas.iterrows():
+            if tiene_coordenadas_punto and str(punto_subido.get("ID", "")) == id_punto:
+                # El punto en revisión ya aparece como estrella azul.
+                continue
+            nombre_subido = html.escape(str(punto_subido.get("Nombre del Punto", "")))
+            estado_subido_growth = html.escape(str(punto_subido.get("Estado Growth", "")))
+            direccion_subido = html.escape(str(punto_subido.get("Dirección", "")))
+            popup_subido = folium.Popup(
+                f"<b>🔴 {nombre_subido}</b><br>Estado Growth: {estado_subido_growth}<br>"
+                f"Dirección: {direccion_subido}",
+                max_width=300,
             )
+            folium.CircleMarker(
+                [punto_subido["lat"], punto_subido["lon"]],
+                radius=7,
+                popup=popup_subido,
+                color="#B4022A",
+                weight=2,
+                fill=True,
+                fill_color="#E4032E",
+                fill_opacity=0.9,
+            ).add_to(capa_growth)
+
+        capa_tiendas.add_to(m)
+        capa_iso.add_to(m)
+        capa_growth.add_to(m)
+        folium.LayerControl(collapsed=True).add_to(m)
 
         st.caption(
-            "🔵 Punto evaluado · 🟠 Tiendas abiertas cercanas "
-            f"(radio {radio_cercania_m} m) · 🟣 Todos los puntos "
-            "potenciales — haz clic en cualquiera para ver el detalle."
+            "🔵 Punto evaluado · 🟠 Tiendas abiertas cercanas · "
+            "🟣 Puntos potenciales (hoja ISO) · 🔴 Operaciones con "
+            "Estado Growth = Subido. Usa el control superior derecho para ocultar capas."
         )
-        st_folium(m, use_container_width=True, height=480, returned_objects=[])
+        st_folium(m, use_container_width=True, height=500, returned_objects=[])
     else:
-        st.warning(f"No se pudo ubicar el punto en el mapa. Motivo: {fuente}")
+        st.warning(
+            "Este punto no tiene coordenadas explícitas en la hoja "
+            "`Visitas_Operaciones`. Para respetar el cambio solicitado, "
+            "no se utilizó ni se geocodificó el enlace de Maps."
+        )
+
+    if n_growth_subidos_sin_coordenadas:
+        st.info(
+            f"{n_growth_subidos_sin_coordenadas} registro(s) con Estado Growth = "
+            "Subido no se muestran en el mapa porque la base no contiene "
+            "coordenadas explícitas válidas para ellos."
+        )
 
     # ------------------------------------- Resultados de cercanía (texto) --
     st.divider()
     st.subheader(f"📡 Cercanía en un radio de {radio_cercania_m} m")
     st.caption(
-        "Esto es solo por distancia (no por parecido de nombre): tiendas ya "
-        "ABIERTAS y puntos que ya se habían presentado antes como "
-        "microsaturación (Puntos Potenciales), sin importar cómo se llamen."
+        "Esto es solo por distancia (no por parecido de nombre): tiendas "
+        "ABIERTAS y puntos potenciales de la hoja ISO. El PDF incluye solo "
+        "las cinco tiendas abiertas más cercanas."
     )
 
     filas_cercania = []
-    for _, t in tiendas_cercanas.iterrows():
-        filas_cercania.append({
-            "Distancia (m)": round(t["distancia_m"]),
+    filas_tiendas_pdf = []
+    for _, tienda in tiendas_cercanas.iterrows():
+        fila_tienda = {
+            "Distancia (m)": round(tienda["distancia_m"]),
             "Tipo": "🟠 Tienda abierta",
-            "Nombre": t.get("NAME", ""),
-            "Detalle": f"{t.get('PLAZA 2026', '')} · {t.get('MUNICIPIO', '')}",
-        })
-    for _, p in puntos_potenciales_cercanos.iterrows():
+            "Nombre": tienda.get("NAME", ""),
+            "Detalle": f"{tienda.get('PLAZA 2026', '')} · {tienda.get('MUNICIPIO', '')}",
+        }
+        filas_cercania.append(fila_tienda)
+        filas_tiendas_pdf.append(fila_tienda)
+    for _, punto_iso in puntos_potenciales_cercanos.iterrows():
         filas_cercania.append({
-            "Distancia (m)": round(p["distancia_m"]),
-            "Tipo": "🟣 Punto potencial",
-            "Nombre": p.get("Nombre PP", ""),
-            "Detalle": f"{p.get('Estado', '')} · {p.get('Region', '')} / {p.get('UPZ', '')}",
+            "Distancia (m)": round(punto_iso["distancia_m"]),
+            "Tipo": "🟣 Punto potencial ISO",
+            "Nombre": punto_iso.get("Nombre PP", ""),
+            "Detalle": f"{punto_iso.get('Estado', '')} · {punto_iso.get('Ciudad', '')}",
         })
 
     if filas_cercania:
@@ -553,7 +650,7 @@ else:
         fotos=fotos,
         lat=lat,
         lon=lon,
-        cercania=filas_cercania,
+        tiendas_cercanas=filas_tiendas_pdf,
     )
     st.download_button(
         "⬇️ Descargar informe en PDF",
