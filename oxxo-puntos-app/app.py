@@ -16,6 +16,10 @@ from src.pdf_report import generar_informe_pdf
 import os
 from pathlib import Path
 
+# ========== NUEVO: Import para calendario visual ==========
+from streamlit_calendar import calendar
+import datetime as dt
+
 ASSETS_DIR = Path("src/assets")
 LOGO_PATH = ASSETS_DIR / "logo_oxxo_simil.png"
 ICONO_PATH = ASSETS_DIR / "icono_app.png"
@@ -248,10 +252,13 @@ with st.sidebar:
     st.subheader("📅 Filtro por fecha")
 
     tiene_fechas = visitas_full[DATE_COLUMN_STD].notna().any()
+
+    # Variables de filtrado
     rango_fecha = None
+    fecha_unica = None
+    fecha_unica_seleccionada = False
+
     if tiene_fechas:
-        # Ampliamos el rango por defecto para asegurar que se muestren todos los puntos nuevos
-        # desde el inicio del año 2025 hasta la fecha máxima registrada en la base.
         import datetime
         fecha_min_historica = datetime.date(2025, 1, 1)
         fecha_max = visitas_full[DATE_COLUMN_STD].max().date()
@@ -260,13 +267,183 @@ with st.sidebar:
         min_real = visitas_full[DATE_COLUMN_STD].min().date()
         if min_real > fecha_min_historica:
             fecha_min_historica = min_real
-            
-        rango_fecha = st.date_input(
-            "Ver puntos evaluados entre estas fechas",
-            value=(fecha_min_historica, fecha_max),
-            min_value=fecha_min_historica,
-            max_value=fecha_max,
+
+        # ---------- Selector de modo ----------
+        modo_filtro = st.radio(
+            "Modo de filtrado",
+            options=["📆 Calendario visual", "🔢 Rango manual", "📌 Un día específico"],
+            index=0,
+            horizontal=False,
         )
+
+        # Preparar datos del calendario (proyectos por fecha)
+        fechas_con_proyectos = {}
+        for _, fila in visitas_full.iterrows():
+            if pd.notna(fila.get(DATE_COLUMN_STD)):
+                fecha_str = fila[DATE_COLUMN_STD].strftime("%Y-%m-%d")
+                nombre = str(fila.get("Nombre del Punto", "Sin nombre"))
+                fechas_con_proyectos.setdefault(fecha_str, []).append(nombre)
+
+        calendar_events = []
+        for fecha_str, nombres in fechas_con_proyectos.items():
+            calendar_events.append({
+                "title": f"{len(nombres)} proy.",
+                "start": fecha_str,
+                "allDay": True,
+                "backgroundColor": OXXO_ROJO,
+                "borderColor": OXXO_ROJO_OSCURO,
+                "textColor": OXXO_BLANCO,
+            })
+
+        custom_css_cal = f"""
+            .fc-event-past {{
+                opacity: 0.85;
+            }}
+            .fc-event-title {{
+                font-weight: 700;
+                font-size: 0.85em;
+            }}
+            .fc-toolbar-title {{
+                font-size: 1.2rem;
+            }}
+            .fc-daygrid-day-number {{
+                font-weight: 600;
+            }}
+            .fc-daygrid-day.fc-day-today {{
+                background-color: rgba(228, 3, 46, 0.08);
+            }}
+        """
+
+        # ============================================
+        # OPCIÓN A: Calendario visual (FullCalendar)
+        # ============================================
+        if modo_filtro == "📆 Calendario visual":
+            st.caption("Haz clic en un día para ver sus proyectos. Arrastra para seleccionar un rango.")
+
+            calendar_options = {
+                "selectable": True,
+                "editable": False,
+                "headerToolbar": {
+                    "left": "today prev,next",
+                    "center": "title",
+                    "right": "dayGridMonth,dayGridWeek,dayGridDay",
+                },
+                "initialView": "dayGridMonth",
+                "locale": "es",
+                "firstDay": 1,
+                "height": "auto",
+                "dayMaxEvents": 3,
+                "moreLinkClick": "day",
+            }
+
+            cal = calendar(
+                events=calendar_events,
+                options=calendar_options,
+                custom_css=custom_css_cal,
+                key="calendar_fechas_proyectos",
+            )
+
+            # Procesar la selección del calendario
+            if cal:
+                callback = cal.get("callback")
+                if callback == "select":
+                    select_data = cal.get("select", {})
+                    start_str = select_data.get("start")
+                    end_str = select_data.get("end")
+                    if start_str:
+                        start_date = dt.datetime.strptime(start_str[:10], "%Y-%m-%d").date()
+                        end_date = dt.datetime.strptime(end_str[:10], "%Y-%m-%d").date()
+                        if start_date == end_date:
+                            fecha_unica = start_date
+                            fecha_unica_seleccionada = True
+                            st.success(f"Día seleccionado: **{start_date.strftime('%d/%m/%Y')}**")
+                        else:
+                            rango_fecha = (start_date, end_date)
+                            st.success(f"Rango: **{start_date.strftime('%d/%m/%Y')}** a **{end_date.strftime('%d/%m/%Y')}**")
+
+                elif callback == "dateClick":
+                    click_data = cal.get("dateClick", {})
+                    date_str = click_data.get("date")
+                    if date_str:
+                        fecha_unica = dt.datetime.strptime(date_str[:10], "%Y-%m-%d").date()
+                        fecha_unica_seleccionada = True
+                        st.success(f"Día seleccionado: **{fecha_unica.strftime('%d/%m/%Y')}**")
+
+                elif callback == "eventClick":
+                    event_data = cal.get("eventClick", {}).get("event", {})
+                    start_str = event_data.get("start")
+                    if start_str:
+                        fecha_unica = dt.datetime.strptime(start_str[:10], "%Y-%m-%d").date()
+                        fecha_unica_seleccionada = True
+                        st.success(f"Día seleccionado: **{fecha_unica.strftime('%d/%m/%Y')}**")
+
+            if st.button("🗑️ Limpiar selección", use_container_width=True):
+                st.session_state.pop("calendar_fechas_proyectos", None)
+                st.rerun()
+
+        # ============================================
+        # OPCIÓN B: Rango manual con date_input
+        # ============================================
+        elif modo_filtro == "🔢 Rango manual":
+            rango_fecha = st.date_input(
+                "Selecciona el rango de fechas",
+                value=(fecha_min_historica, fecha_max),
+                min_value=fecha_min_historica,
+                max_value=fecha_max,
+            )
+
+        # ============================================
+        # OPCIÓN C: Un día específico (con mini calendario)
+        # ============================================
+        elif modo_filtro == "📌 Un día específico":
+            st.caption("Haz clic en un día del calendario o selecciona manualmente abajo:")
+
+            cal_mini_options = {
+                "selectable": True,
+                "editable": False,
+                "headerToolbar": {
+                    "left": "today prev,next",
+                    "center": "title",
+                    "right": "dayGridMonth",
+                },
+                "initialView": "dayGridMonth",
+                "locale": "es",
+                "firstDay": 1,
+                "height": "auto",
+            }
+
+            cal_mini = calendar(
+                events=calendar_events,
+                options=cal_mini_options,
+                custom_css=custom_css_cal,
+                key="calendar_dia_especifico",
+            )
+
+            if cal_mini:
+                callback = cal_mini.get("callback")
+                if callback == "dateClick":
+                    date_str = cal_mini.get("dateClick", {}).get("date")
+                    if date_str:
+                        fecha_unica = dt.datetime.strptime(date_str[:10], "%Y-%m-%d").date()
+                        fecha_unica_seleccionada = True
+                elif callback == "eventClick":
+                    event_data = cal_mini.get("eventClick", {}).get("event", {})
+                    start_str = event_data.get("start")
+                    if start_str:
+                        fecha_unica = dt.datetime.strptime(start_str[:10], "%Y-%m-%d").date()
+                        fecha_unica_seleccionada = True
+
+            # Fallback: input manual
+            fecha_manual = st.date_input(
+                "O selecciona manualmente:",
+                value=fecha_max,
+                min_value=fecha_min_historica,
+                max_value=fecha_max,
+            )
+            if fecha_manual and not fecha_unica_seleccionada:
+                fecha_unica = fecha_manual
+                fecha_unica_seleccionada = True
+
     else:
         st.caption(
             "No se detectó una columna de fecha en 'Visitas_Operaciones' "
@@ -289,12 +466,25 @@ with st.sidebar:
 visitas = visitas_full.copy()
 
 n_sin_fecha_excluidos = 0
+
+# Filtro por rango de fechas
 if rango_fecha and isinstance(rango_fecha, tuple) and len(rango_fecha) == 2:
     inicio, fin = rango_fecha
     con_fecha = visitas[DATE_COLUMN_STD].notna()
     en_rango = (visitas[DATE_COLUMN_STD].dt.date >= inicio) & (visitas[DATE_COLUMN_STD].dt.date <= fin)
     n_sin_fecha_excluidos = int((~con_fecha).sum())
     visitas = visitas[con_fecha & en_rango]
+
+# Filtro por fecha única (seleccionada del calendario)
+elif fecha_unica_seleccionada and fecha_unica is not None:
+    con_fecha = visitas[DATE_COLUMN_STD].notna()
+    en_fecha = visitas[DATE_COLUMN_STD].dt.date == fecha_unica
+    n_sin_fecha_excluidos = int((~con_fecha).sum())
+    visitas = visitas[con_fecha & en_fecha]
+
+# Sin filtro de fecha: mostrar todos
+else:
+    n_sin_fecha_excluidos = 0
 
 n_subidos_ocultos = 0
 if not mostrar_subidos:
@@ -316,7 +506,7 @@ if page == "🔍 Comparación de nombres":
         f"{len(visitas)} puntos evaluados · {len(tiendas)} tiendas "
         "ABIERTA / OBRA / FIRMADA en la base."
     )
-    if n_sin_fecha_excluidos:
+    if n_sin_fecha_excluidos and (rango_fecha or fecha_unica_seleccionada):
         st.caption(
             f"⚠️ {n_sin_fecha_excluidos} punto(s) sin fecha registrada se "
             "excluyeron por el filtro de fecha."
@@ -326,6 +516,8 @@ if page == "🔍 Comparación de nombres":
             f"👁️ {n_subidos_ocultos} punto(s) ya marcados como 'Subido' "
             "están ocultos (activa la casilla en la barra lateral para verlos)."
         )
+    if not rango_fecha and not fecha_unica_seleccionada:
+        st.caption(f"📋 Mostrando **todos** los {len(visitas)} proyectos (sin filtro de fecha activo).")
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Puntos evaluados", len(match_table))
@@ -442,10 +634,6 @@ else:
         st.subheader("Fotos del local")
         fotos = parse_photo_urls(fila_visita.get("Fotos del Local Revisado", ""))
         if fotos:
-            # Dos columnas mantienen una lectura ordenada sin alterar el
-            # orden original de las imágenes en la base de Operaciones.
-            # Para mejorar el rendimiento, limitamos la carga visual a 6 fotos
-            # por defecto, evitando bloqueos por descargas simultáneas.
             columnas_fotos = st.columns(2)
             for indice, url in enumerate(fotos[:6], start=1):
                 with columnas_fotos[(indice - 1) % 2]:
@@ -461,9 +649,6 @@ else:
         st.markdown(f'<div style="background-image: url("{str(FONDO_PATH)}"); background-size: cover; background-position: center; padding: 10px; border-radius: 10px;">', unsafe_allow_html=True)
     st.caption("Haz clic en cualquier punto del mapa para ver su información.")
 
-    # La ubicación del punto se toma exclusivamente de columnas explícitas
-    # de latitud y longitud en Visitas_Operaciones. El enlace de Maps queda
-    # disponible arriba como consulta, pero nunca se usa para geolocalizar.
     lat = fila_visita.get("lat")
     lon = fila_visita.get("lon")
     tiene_coordenadas_punto = (
@@ -475,8 +660,6 @@ else:
     tiendas_cercanas = pd.DataFrame()
     puntos_potenciales_cercanos = pd.DataFrame()
 
-    # Si el punto seleccionado no cuenta con coordenadas, la capa de Subidos
-    # todavía puede consultarse cuando existan registros georreferenciados.
     hay_subidos_mapeables = not operaciones_growth_subidas.empty
     if tiene_coordenadas_punto:
         centro_mapa = [lat, lon]
@@ -488,8 +671,6 @@ else:
         ]
         zoom_inicial = 6
     elif not puntos_potenciales.empty:
-        # Conserva la consulta de ISO aunque la fila de Operaciones aún no
-        # tenga latitud y longitud diligenciadas.
         centro_mapa = [
             float(puntos_potenciales["lat"].mean()),
             float(puntos_potenciales["lon"].mean()),
@@ -526,8 +707,6 @@ else:
                 icon=custom_icon,
             ).add_to(m)
 
-            # Solo se consideran tiendas ABIERTAS y se conservan ordenadas
-            # por distancia para la tabla y el Top 5 del informe PDF.
             tiendas_abiertas = tiendas[tiendas["ESTADO"] == "ABIERTA"]
             tiendas_cercanas = buscar_cercanos(
                 lat, lon, tiendas_abiertas,
@@ -548,8 +727,6 @@ else:
                     icon=folium.Icon(color="orange", icon="shopping-cart"),
                 ).add_to(capa_tiendas)
 
-        # Todos los puntos de la hoja ISO se conservan visibles en el mapa;
-        # la tabla de cercanía, en cambio, aplica el radio seleccionado.
         if not puntos_potenciales.empty:
             for _, punto_iso in puntos_potenciales.iterrows():
                 popup_iso = folium.Popup(
@@ -571,11 +748,8 @@ else:
                     lat, lon, radio_m=radio_cercania_m, df_pp=puntos_potenciales,
                 )
 
-        # Capa solicitada: datos directamente de Operaciones cuyo Estado
-        # Growth es Subido y que cuentan con latitud/longitud explícitas.
         for _, punto_subido in operaciones_growth_subidas.iterrows():
             if tiene_coordenadas_punto and str(punto_subido.get("ID", "")) == id_punto:
-                # El punto en revisión ya aparece como estrella azul.
                 continue
             nombre_subido = html.escape(str(punto_subido.get("Nombre del Punto", "")))
             estado_subido_growth = html.escape(str(punto_subido.get("Estado Growth", "")))
