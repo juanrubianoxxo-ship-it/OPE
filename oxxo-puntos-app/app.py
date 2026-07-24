@@ -327,33 +327,38 @@ if page == "🔍 Comparación de nombres":
 else:
     st.title("Detalle del punto evaluado")
 
-    # Construir opciones con ID + Nombre para evitar ambigüedades
-    opciones = []
-    for _, fila in match_table.iterrows():
-        id_val = str(fila.get("ID", ""))
-        nombre = fila["Nombre del Punto"]
-        if id_val and id_val != "nan":
-            opciones.append(f"{id_val} · {nombre}")
-        else:
-            opciones.append(nombre)
-
-    if not opciones:
+    # Construir opciones con ID como clave interna y ID + Nombre para mostrar
+    if match_table.empty:
         st.info("No hay puntos que cumplan con los filtros seleccionados.")
         st.stop()
 
-    seleccion_display = st.selectbox("Selecciona un punto evaluado", opciones)
+    # Mapeo de ID -> Nombre para el format_func del selectbox
+    dict_nombres = match_table.set_index("ID")["Nombre del Punto"].to_dict()
+    lista_ids = list(dict_nombres.keys())
 
-    # Extraer el nombre original de la selección (sin el ID)
-    if " · " in seleccion_display:
-        seleccion = " · ".join(seleccion_display.split(" · ")[1:])
-    else:
-        seleccion = seleccion_display
+    def format_func(id_val):
+        nombre = dict_nombres.get(id_val, "Sin nombre")
+        if id_val and str(id_val) != "nan":
+            return f"{id_val} · {nombre}"
+        return nombre
 
-    fila_match = match_table[match_table["Nombre del Punto"] == seleccion].iloc[0]
-    # Para el detalle completo (incluyendo coordenadas de Maps), buscar en visitas_full
-    fila_visita_full = visitas_full[visitas_full["Nombre del Punto"] == seleccion]
+    id_seleccionado = st.selectbox(
+        "Selecciona un punto evaluado",
+        options=lista_ids,
+        format_func=format_func
+    )
+
+    # Obtener la fila correspondiente por ID
+    fila_match = match_table[match_table["ID"] == id_seleccionado].iloc[0]
+    seleccion = fila_match["Nombre del Punto"]
+
+    # Para el detalle completo, buscar en visitas_full por ID (asegurando comparación de strings)
+    visitas_full["ID_str"] = visitas_full["ID"].astype(str)
+    fila_visita_full = visitas_full[visitas_full["ID_str"] == str(id_seleccionado)]
+    
     if fila_visita_full.empty:
-        fila_visita = visitas[visitas["Nombre del Punto"] == seleccion].iloc[0]
+        visitas["ID_str"] = visitas["ID"].astype(str)
+        fila_visita = visitas[visitas["ID_str"] == str(id_seleccionado)].iloc[0]
     else:
         fila_visita = fila_visita_full.iloc[0]
     id_punto = str(fila_visita.get("ID", ""))
