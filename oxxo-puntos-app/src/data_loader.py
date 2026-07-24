@@ -100,46 +100,72 @@ def _to_coordinate(series: pd.Series) -> pd.Series:
 def _add_visit_coordinates(df: pd.DataFrame) -> tuple[str | None, str | None]:
     """
     Agrega las columnas normalizadas ``lat`` y ``lon``.
-    Se ignoran las columnas X e Y y se enfoca exclusivamente en el enlace de Maps.
+    Usa la estrategia en cascada de maps_utils:
+    1. Parseo directo del enlace de Google Maps
+    2. Resolver links acortados (maps.app.goo.gl)
+    3. Geocodificación por dirección con Nominatim
     """
-    import re
-    def _extract_from_maps(url):
-        if not isinstance(url, str) or not url.strip():
-            return None, None
-        match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', url)
-        if match:
-            return float(match.group(1)), float(match.group(2))
-        match = re.search(r'/@(-?\d+\.\d+),(-?\d+\.\d+)', url)
-        if match:
-            return float(match.group(1)), float(match.group(2))
-        match = re.search(r'!1d(-?\d+\.\d+)!2d(-?\d+\.\d+)', url)
-        if match:
-            return float(match.group(1)), float(match.group(2))
-        match = re.search(r'!2d(-?\d+\.\d+)!3d(-?\d+\.\d+)', url)
-        if match:
-            return float(match.group(1)), float(match.group(2))
-        return None, None
+    from src.maps_utils import get_coordinates
 
     df["lat"] = pd.Series(float("nan"), index=df.index, dtype="float64")
     df["lon"] = pd.Series(float("nan"), index=df.index, dtype="float64")
 
-    # Buscar columna de Maps
+    # Buscar la columna de Maps - buscar varios nombres posibles
     maps_col = None
+    # Primero buscar con el nombre exacto esperado
     for col in df.columns:
-        if isinstance(col, str) and ("maps" in col.lower() or "ubicación" in col.lower()):
-            maps_col = col
-            break
-    
+        if isinstance(col, str):
+            col_lower = col.lower().strip()
+            if ("enlace" in col_lower and "maps" in col_lower) or \
+               ("ubicación" in col_lower) or \
+               ("google maps" in col_lower) or \
+               col_lower == "maps" or \
+               col_lower == "mapa":
+                maps_col = col
+                break
+    # Si no se encontró, buscar cualquier columna que contenga "maps"
+    if maps_col is None:
+        for col in df.columns:
+            if isinstance(col, str) and "maps" in col.lower():
+                maps_col = col
+                break
+    # Última opción: buscar "ubicación"
+    if maps_col is None:
+        for col in df.columns:
+            if isinstance(col, str) and "ubicac" in col.lower():
+                maps_col = col
+                break
+
+    # Obtener columna de dirección para respaldo de geocodificación
+    address_col = None
+    for col in df.columns:
+        if isinstance(col, str):
+            col_lower = col.lower().strip()
+            if "dirección" in col_lower or "direccion" in col_lower or "address" in col_lower:
+                address_col = col
+                break
+
     if maps_col:
         for idx, row in df.iterrows():
-            lat, lon = _extract_from_maps(row[maps_col])
+            maps_link = row.get(maps_col, "")
+            address = row.get(address_col, "") if address_col else ""
+            if not isinstance(maps_link, str) or not maps_link.strip():
+                if isinstance(address, str) and address.strip():
+                    # Respaldo: geocodificar por dirección
+                    from src.maps_utils import geocode_address
+                    coords = geocode_address(address)
+                    if coords:
+                        df.at[idx, "lat"] = coords[0]
+                        df.at[idx, "lon"] = coords[1]
+                continue
+            lat, lon, _ = get_coordinates(maps_link, address if isinstance(address, str) else "")
             if lat is not None and lon is not None:
                 df.at[idx, "lat"] = lat
                 df.at[idx, "lon"] = lon
 
     valid = df["lat"].between(-90, 90) & df["lon"].between(-180, 180)
     df.loc[~valid, ["lat", "lon"]] = float("nan")
-    return None, None
+    return maps_col, address_col
 
 
 @st.cache_data(show_spinner="Cargando tiendas vigentes...")
