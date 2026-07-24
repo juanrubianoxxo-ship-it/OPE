@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 
 
-ASSETS_DIR = Path("oxxo-puntos-app/src/assets")
+ASSETS_DIR = Path("src/assets")
 LOGO_PATH = ASSETS_DIR / "logo_oxxo_simil.png"
 ICONO_PATH = ASSETS_DIR / "icono_app.png"
 FONDO_PATH = ASSETS_DIR / "fondo_login.png"
@@ -327,12 +327,27 @@ if page == "🔍 Comparación de nombres":
 else:
     st.title("Detalle del punto evaluado")
 
-    nombres = match_table["Nombre del Punto"].tolist()
-    if not nombres:
+    # Construir opciones con ID + Nombre para evitar ambigüedades
+    opciones = []
+    for _, fila in match_table.iterrows():
+        id_val = str(fila.get("ID", ""))
+        nombre = fila["Nombre del Punto"]
+        if id_val and id_val != "nan":
+            opciones.append(f"{id_val} · {nombre}")
+        else:
+            opciones.append(nombre)
+
+    if not opciones:
         st.info("No hay puntos que cumplan con los filtros seleccionados.")
         st.stop()
 
-    seleccion = st.selectbox("Selecciona un punto evaluado", nombres)
+    seleccion_display = st.selectbox("Selecciona un punto evaluado", opciones)
+
+    # Extraer el nombre original de la selección (sin el ID)
+    if " · " in seleccion_display:
+        seleccion = " · ".join(seleccion_display.split(" · ")[1:])
+    else:
+        seleccion = seleccion_display
 
     fila_match = match_table[match_table["Nombre del Punto"] == seleccion].iloc[0]
     # Para el detalle completo (incluyendo coordenadas de Maps), buscar en visitas_full
