@@ -1,28 +1,13 @@
-"""
-Genera un informe PDF de un punto evaluado (base de Operaciones):
-datos principales, nombre original vs. nombre nuevo propuesto, ubicación
-(link de Maps + coordenadas), cercanía (tiendas/puntos potenciales) y
-fotos del local.
+"""Generación del informe PDF de un punto evaluado.
 
-Uso típico desde app.py:
-
-    from src.pdf_report import generar_informe_pdf
-
-    pdf_bytes = generar_informe_pdf(
-        datos=fila_visita.to_dict(),
-        nombre_original=seleccion,
-        nombre_nuevo=nuevo_nombre_input,
-        fotos=fotos,
-        lat=lat,
-        lon=lon,
-        cercania=filas_cercania,
-    )
-    st.download_button("Descargar informe PDF", pdf_bytes,
-                        file_name=f"informe_{id_punto}.pdf",
-                        mime="application/pdf")
+El informe conserva el enlace de Maps como referencia, imprime las coordenadas
+explícitas recibidas desde Operaciones y limita el apartado de cercanía a las
+cinco tiendas abiertas más cercanas. Las fotografías se acomodan en una
+cuadrícula de dos columnas para que el documento sea más legible.
 """
 from __future__ import annotations
 
+import html
 import io
 from datetime import datetime
 from typing import Optional
@@ -34,17 +19,14 @@ from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.units import cm
 from reportlab.platypus import (
-    SimpleDocTemplate,
+    Image as RLImage,
     Paragraph,
+    SimpleDocTemplate,
     Spacer,
     Table,
     TableStyle,
-    Image as RLImage,
 )
 
-# Campos del punto evaluado que se incluyen en el informe, en este orden.
-# El primer elemento es el nombre de columna en la fila de la visita, el
-# segundo es la etiqueta que se imprime.
 CAMPOS_INFORME = [
     ("Nombre del Punto", "Nombre del punto (original)"),
     ("Jefe de zona", "Jefe de zona"),
@@ -61,14 +43,114 @@ CAMPOS_INFORME = [
     ("Comentarios", "Comentarios"),
 ]
 
+COLOR_ROJO = colors.HexColor("#E4032E")
+COLOR_AMARILLO = colors.HexColor("#FFD200")
+COLOR_GRIS_CLARO = colors.HexColor("#F6F6F6")
+COLOR_GRIS_TABLA = colors.HexColor("#333333")
+
+
+def _texto(valor: object) -> str:
+    """Convierte un valor de Excel en texto seguro y vacío si no existe."""
+    if valor is None or (not isinstance(valor, str) and pd.isna(valor)):
+        return ""
+    texto = str(valor).strip()
+    return "" if texto.casefold() == "nan" else texto
+
 
 def _descargar_imagen(url: str, timeout: int = 10) -> Optional[io.BytesIO]:
+    """Descarga una foto de manera tolerante a errores para el informe."""
     try:
-        resp = requests.get(url, timeout=timeout)
-        resp.raise_for_status()
-        return io.BytesIO(resp.content)
-    except Exception:
+        respuesta = requests.get(url, timeout=timeout)
+        respuesta.raise_for_status()
+        return io.BytesIO(respuesta.content)
+    except requests.RequestException:
         return None
+
+
+def _tabla_estandar(filas, anchos, header: bool = False) -> Table:
+    """Aplica una apariencia consistente a las tablas del informe."""
+    tabla = Table(filas, colWidths=anchos, repeatRows=1 if header else 0)
+    estilo = [
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#C8C8C8")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]
+    if header:
+        estilo.extend([
+            ("BACKGROUND", (0, 0), (-1, 0), COLOR_GRIS_TABLA),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, COLOR_GRIS_CLARO]),
+        ])
+    else:
+        estilo.extend([
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#F0F0F0")),
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ])
+    tabla.setStyle(TableStyle(estilo))
+    return tabla
+
+
+def _top_cinco_tiendas(tiendas_cercanas: Optional[list[dict]]) -> list[dict]:
+    """Ordena por distancia y devuelve exclusivamente las cinco tiendas más cercanas."""
+    if not tiendas_cercanas:
+        return []
+
+    filas = []
+    for fila in tiendas_cercanas:
+        tipo = _texto(fila.get("Tipo", ""))
+        # Permite tanto el formato actual de app.py como llamadas directas.
+        if tipo and "tienda" not in tipo.casefold():
+            continue
+        try:
+            distancia = float(fila.get("Distancia (m)", float("inf")))
+        except (TypeError, ValueError):
+            distancia = float("inf")
+        if distancia != float("inf"):
+            filas.append({**fila, "_distancia": distancia})
+
+    filas.sort(key=lambda fila: fila["_distancia"])
+    return filas[:5]
+
+
+def _cuadricula_fotos(fotos: list[str], normal: ParagraphStyle) -> tuple[list, int]:
+    """Construye una cuadrícula de dos columnas y cuenta las fotos insertadas."""
+    celdas = []
+    insertadas = 0
+    for indice, url in enumerate(fotos, start=1):
+        imagen_bytes = _descargar_imagen(url)
+        if imagen_bytes is None:
+            celdas.append(Paragraph(f"Foto {indice}: no disponible.", normal))
+            continue
+        try:
+            imagen = RLImage(imagen_bytes, width=7.2 * cm, height=5.1 * cm, kind="proportional")
+            celdas.append(imagen)
+            insertadas += 1
+        except Exception:
+            celdas.append(Paragraph(f"Foto {indice}: no se pudo insertar.", normal))
+
+    if not celdas:
+        return [], 0
+
+    filas = [celdas[i:i + 2] for i in range(0, len(celdas), 2)]
+    if len(filas[-1]) == 1:
+        filas[-1].append("")
+
+    tabla = Table(filas, colWidths=[8.1 * cm, 8.1 * cm], hAlign="LEFT")
+    tabla.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 4),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#DDDDDD")),
+    ]))
+    return [tabla], insertadas
 
 
 def generar_informe_pdf(
@@ -78,176 +160,109 @@ def generar_informe_pdf(
     nombre_nuevo: Optional[str] = None,
     lat: Optional[float] = None,
     lon: Optional[float] = None,
-    cercania: Optional[list[dict]] = None,
+    tiendas_cercanas: Optional[list[dict]] = None,
 ) -> bytes:
-    """
-    Construye el informe en memoria y devuelve los bytes del PDF, listos
-    para pasar a st.download_button.
-
-    `cercania` es opcional: una lista de dicts (como la que arma app.py en
-    `filas_cercania`), típicamente con las llaves "Distancia (m)", "Tipo",
-    "Nombre" y "Detalle". Si viene vacía o None, esa sección simplemente
-    no se imprime.
-    """
+    """Construye el informe en memoria y devuelve los bytes del PDF."""
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
         buffer,
         pagesize=letter,
-        topMargin=1.5 * cm,
-        bottomMargin=1.5 * cm,
+        topMargin=1.4 * cm,
+        bottomMargin=1.4 * cm,
         leftMargin=1.8 * cm,
         rightMargin=1.8 * cm,
     )
 
     styles = getSampleStyleSheet()
-    titulo_style = ParagraphStyle(
-        "TituloInforme", parent=styles["Title"], fontSize=16, spaceAfter=6
+    titulo = ParagraphStyle(
+        "TituloInforme",
+        parent=styles["Title"],
+        fontName="Helvetica-Bold",
+        fontSize=16,
+        leading=20,
+        textColor=COLOR_ROJO,
+        spaceAfter=5,
     )
-    subtitulo_style = ParagraphStyle(
-        "Subtitulo", parent=styles["Heading2"], spaceBefore=12, spaceAfter=6
+    subtitulo = ParagraphStyle(
+        "SubtituloInforme",
+        parent=styles["Heading2"],
+        fontName="Helvetica-Bold",
+        fontSize=11,
+        textColor=COLOR_ROJO,
+        spaceBefore=10,
+        spaceAfter=5,
     )
-    normal = styles["Normal"]
-
-    story = []
-
-    # ---- Encabezado -------------------------------------------------
-    story.append(Paragraph("Informe de punto evaluado", titulo_style))
-    story.append(
-        Paragraph(
-            f"Generado el {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-            normal,
-        )
+    normal = ParagraphStyle(
+        "NormalInforme", parent=styles["Normal"], fontSize=8.5, leading=11
     )
-    story.append(Spacer(1, 10))
 
-    # ---- Nombre original vs. nombre nuevo propuesto ------------------
-    if nombre_nuevo and nombre_nuevo.strip() and nombre_nuevo.strip() != nombre_original:
-        tabla_nombres = Table(
+    story = [
+        Paragraph("Informe de punto evaluado", titulo),
+        Paragraph(f"Generado el {datetime.now().strftime('%Y-%m-%d %H:%M')}", normal),
+        Spacer(1, 8),
+    ]
+
+    nombre_original = _texto(nombre_original)
+    nombre_nuevo = _texto(nombre_nuevo)
+    if nombre_nuevo and nombre_nuevo != nombre_original:
+        story.append(_tabla_estandar(
             [
                 ["Nombre original", nombre_original],
-                ["Nombre nuevo propuesto", nombre_nuevo.strip()],
+                ["Nombre nuevo propuesto", nombre_nuevo],
             ],
-            colWidths=[5 * cm, 10.5 * cm],
-        )
-        tabla_nombres.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f0f0f0")),
-                    ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("BACKGROUND", (0, 1), (1, 1), colors.HexColor("#fff3cd")),
-                ]
-            )
-        )
-        story.append(tabla_nombres)
-        story.append(Spacer(1, 10))
+            [5 * cm, 10.5 * cm],
+        ))
     else:
-        story.append(Paragraph(f"<b>Nombre del punto:</b> {nombre_original}", normal))
-        story.append(Spacer(1, 10))
+        story.append(Paragraph(f"<b>Nombre del punto:</b> {html.escape(nombre_original)}", normal))
+    story.append(Spacer(1, 8))
 
-    # ---- Datos principales -------------------------------------------
-    story.append(Paragraph("Información principal", subtitulo_style))
-    filas = []
+    story.append(Paragraph("Información principal", subtitulo))
+    filas_datos = []
     for campo, etiqueta in CAMPOS_INFORME:
         if campo == "Nombre del Punto":
-            continue  # ya se mostró arriba
-        valor = datos.get(campo, "")
-        if pd.isna(valor) if not isinstance(valor, str) else False:
-            valor = ""
-        valor = str(valor).strip() if valor is not None else ""
-        if valor and valor.lower() != "nan":
-            filas.append([etiqueta, valor])
+            continue
+        valor = _texto(datos.get(campo, ""))
+        if valor:
+            filas_datos.append([etiqueta, valor])
+    if filas_datos:
+        story.append(_tabla_estandar(filas_datos, [5 * cm, 10.5 * cm]))
+    story.append(Spacer(1, 8))
 
-    if filas:
-        tabla_datos = Table(filas, colWidths=[5 * cm, 10.5 * cm])
-        tabla_datos.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f0f0f0")),
-                    ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 9),
-                ]
-            )
-        )
-        story.append(tabla_datos)
-    story.append(Spacer(1, 10))
-
-    # ---- Ubicación: link de Maps + coordenadas -------------------------
-    maps_link = (datos.get("Enlace de la ubicación en Google Maps") or "").strip() \
-        if isinstance(datos.get("Enlace de la ubicación en Google Maps"), str) else ""
+    maps_link = _texto(datos.get("Enlace de la ubicación en Google Maps", ""))
     tiene_coords = lat is not None and lon is not None and not pd.isna(lat) and not pd.isna(lon)
-
     if maps_link or tiene_coords:
-        story.append(Paragraph("Ubicación", subtitulo_style))
-        filas_ubi = []
+        story.append(Paragraph("Ubicación", subtitulo))
+        filas_ubicacion = []
         if tiene_coords:
-            filas_ubi.append(["Coordenadas", f"{lat:.3f}, {lon:.3f}"])
+            filas_ubicacion.append(["Coordenadas", f"{float(lat):.6f}, {float(lon):.6f}"])
         if maps_link:
-            filas_ubi.append(["Link de Maps", maps_link])
-        tabla_ubi = Table(filas_ubi, colWidths=[5 * cm, 10.5 * cm])
-        tabla_ubi.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f0f0f0")),
-                    ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
-                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 9),
-                ]
-            )
-        )
-        story.append(tabla_ubi)
-        story.append(Spacer(1, 10))
+            enlace = html.escape(maps_link, quote=True)
+            filas_ubicacion.append(["Link de Maps", Paragraph(f'<link href="{enlace}">Abrir ubicación en Maps</link>', normal)])
+        story.append(_tabla_estandar(filas_ubicacion, [5 * cm, 10.5 * cm]))
+        story.append(Spacer(1, 8))
 
-    # ---- Cercanía: tiendas abiertas / puntos potenciales cercanos ------
-    if cercania:
-        story.append(Paragraph("Cercanía (tiendas abiertas y puntos potenciales)", subtitulo_style))
-        encabezado = ["Distancia (m)", "Tipo", "Nombre", "Detalle"]
-        filas_cercania_pdf = [encabezado]
-        for fila in cercania:
-            filas_cercania_pdf.append([
-                str(fila.get("Distancia (m)", "")),
-                str(fila.get("Tipo", "")),
-                str(fila.get("Nombre", "")),
-                str(fila.get("Detalle", "")),
+    top_tiendas = _top_cinco_tiendas(tiendas_cercanas)
+    story.append(Paragraph("Top 5 tiendas abiertas más cercanas", subtitulo))
+    if top_tiendas:
+        filas_tiendas = [["Distancia (m)", "Tienda", "Plaza / municipio"]]
+        for tienda in top_tiendas:
+            filas_tiendas.append([
+                f"{round(tienda['_distancia'])}",
+                _texto(tienda.get("Nombre", "")),
+                _texto(tienda.get("Detalle", "")),
             ])
-        tabla_cerc = Table(
-            filas_cercania_pdf,
-            colWidths=[2.3 * cm, 3.2 * cm, 5.5 * cm, 4.5 * cm],
-        )
-        tabla_cerc.setStyle(
-            TableStyle(
-                [
-                    ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#333333")),
-                    ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-                    ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
-                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                    ("FONTSIZE", (0, 0), (-1, -1), 8),
-                    ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f7f7f7")]),
-                ]
-            )
-        )
-        story.append(tabla_cerc)
-        story.append(Spacer(1, 10))
+        story.append(_tabla_estandar(filas_tiendas, [2.7 * cm, 6.6 * cm, 6.2 * cm], header=True))
+    else:
+        story.append(Paragraph("No se encontraron tiendas abiertas dentro del radio seleccionado.", normal))
+    story.append(Spacer(1, 8))
 
-    # ---- Fotos ----------------------------------------------------------
+    fotos = fotos or []
     if fotos:
-        story.append(Paragraph("Fotos del local", subtitulo_style))
-        for url in fotos:
-            img_bytes = _descargar_imagen(url)
-            if img_bytes is None:
-                story.append(Paragraph(f"(No se pudo descargar: {url})", normal))
-                continue
-            try:
-                img = RLImage(img_bytes, width=12 * cm, height=8 * cm, kind="proportional")
-                story.append(img)
-                story.append(Spacer(1, 8))
-            except Exception:
-                story.append(Paragraph(f"(No se pudo insertar la imagen: {url})", normal))
+        story.append(Paragraph("Fotos del local", subtitulo))
+        cuadricula, insertadas = _cuadricula_fotos(fotos, normal)
+        story.extend(cuadricula)
+        if insertadas == 0:
+            story.append(Paragraph("No fue posible descargar las fotografías disponibles.", normal))
 
     doc.build(story)
     buffer.seek(0)
