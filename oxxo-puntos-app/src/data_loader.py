@@ -99,20 +99,53 @@ def _to_coordinate(series: pd.Series) -> pd.Series:
 
 def _add_visit_coordinates(df: pd.DataFrame) -> tuple[str | None, str | None]:
     """
-    Agrega las columnas normalizadas ``lat`` y ``lon`` desde columnas
-    explícitas de Operaciones. Las coordenadas no válidas se descartan.
+    Agrega las columnas normalizadas ``lat`` y ``lon``.
+    Prioridad:
+    1. Columnas explícitas de coordenadas en la base.
+    2. Extracción desde el enlace de Google Maps.
     """
+    import re
+    def _extract_from_maps(url):
+        if not isinstance(url, str) or not url.strip():
+            return None, None
+        match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', url)
+        if match:
+            return float(match.group(1)), float(match.group(2))
+        match = re.search(r'/@(-?\d+\.\d+),(-?\d+\.\d+)', url)
+        if match:
+            return float(match.group(1)), float(match.group(2))
+        match = re.search(r'!1d(-?\d+\.\d+)!2d(-?\d+\.\d+)', url)
+        if match:
+            return float(match.group(1)), float(match.group(2))
+        match = re.search(r'!2d(-?\d+\.\d+)!3d(-?\d+\.\d+)', url)
+        if match:
+            return float(match.group(1)), float(match.group(2))
+        return None, None
+
     lat_source = _find_coordinate_column(df, LATITUDE_COLUMN_HINTS)
     lon_source = _find_coordinate_column(df, LONGITUDE_COLUMN_HINTS)
 
     df["lat"] = pd.Series(float("nan"), index=df.index, dtype="float64")
     df["lon"] = pd.Series(float("nan"), index=df.index, dtype="float64")
 
-    if lat_source is None or lon_source is None:
-        return lat_source, lon_source
+    if lat_source is not None and lon_source is not None:
+        df["lat"] = _to_coordinate(df[lat_source])
+        df["lon"] = _to_coordinate(df[lon_source])
+    else:
+        # Buscar columna de Maps
+        maps_col = None
+        for col in df.columns:
+            if isinstance(col, str) and ("maps" in col.lower() or "ubicación" in col.lower()):
+                maps_col = col
+                break
+        
+        if maps_col:
+            for idx, row in df.iterrows():
+                lat, lon = _extract_from_maps(row[maps_col])
+                if lat is not None and lon is not None:
+                    df.at[idx, "lat"] = lat
+                    df.at[idx, "lon"] = lon
 
-    df["lat"] = _to_coordinate(df[lat_source])
-    df["lon"] = _to_coordinate(df[lon_source])
     valid = df["lat"].between(-90, 90) & df["lon"].between(-180, 180)
     df.loc[~valid, ["lat", "lon"]] = float("nan")
     return lat_source, lon_source
