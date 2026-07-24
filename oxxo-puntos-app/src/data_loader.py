@@ -100,9 +100,7 @@ def _to_coordinate(series: pd.Series) -> pd.Series:
 def _add_visit_coordinates(df: pd.DataFrame) -> tuple[str | None, str | None]:
     """
     Agrega las columnas normalizadas ``lat`` y ``lon``.
-    Prioridad:
-    1. Columnas explícitas de coordenadas en la base.
-    2. Extracción desde el enlace de Google Maps.
+    Se ignoran las columnas X e Y y se enfoca exclusivamente en el enlace de Maps.
     """
     import re
     def _extract_from_maps(url):
@@ -122,33 +120,26 @@ def _add_visit_coordinates(df: pd.DataFrame) -> tuple[str | None, str | None]:
             return float(match.group(1)), float(match.group(2))
         return None, None
 
-    lat_source = _find_coordinate_column(df, LATITUDE_COLUMN_HINTS)
-    lon_source = _find_coordinate_column(df, LONGITUDE_COLUMN_HINTS)
-
     df["lat"] = pd.Series(float("nan"), index=df.index, dtype="float64")
     df["lon"] = pd.Series(float("nan"), index=df.index, dtype="float64")
 
-    if lat_source is not None and lon_source is not None:
-        df["lat"] = _to_coordinate(df[lat_source])
-        df["lon"] = _to_coordinate(df[lon_source])
-    else:
-        # Buscar columna de Maps
-        maps_col = None
-        for col in df.columns:
-            if isinstance(col, str) and ("maps" in col.lower() or "ubicación" in col.lower()):
-                maps_col = col
-                break
-        
-        if maps_col:
-            for idx, row in df.iterrows():
-                lat, lon = _extract_from_maps(row[maps_col])
-                if lat is not None and lon is not None:
-                    df.at[idx, "lat"] = lat
-                    df.at[idx, "lon"] = lon
+    # Buscar columna de Maps
+    maps_col = None
+    for col in df.columns:
+        if isinstance(col, str) and ("maps" in col.lower() or "ubicación" in col.lower()):
+            maps_col = col
+            break
+    
+    if maps_col:
+        for idx, row in df.iterrows():
+            lat, lon = _extract_from_maps(row[maps_col])
+            if lat is not None and lon is not None:
+                df.at[idx, "lat"] = lat
+                df.at[idx, "lon"] = lon
 
     valid = df["lat"].between(-90, 90) & df["lon"].between(-180, 180)
     df.loc[~valid, ["lat", "lon"]] = float("nan")
-    return lat_source, lon_source
+    return None, None
 
 
 @st.cache_data(show_spinner="Cargando tiendas vigentes...")
