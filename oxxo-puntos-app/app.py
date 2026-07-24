@@ -16,7 +16,7 @@ from src.pdf_report import generar_informe_pdf
 import os
 from pathlib import Path
 
-ASSETS_DIR = Path("oxxo-puntos-app/src/assets")
+ASSETS_DIR = Path("src/assets")
 LOGO_PATH = ASSETS_DIR / "logo_oxxo_simil.png"
 ICONO_PATH = ASSETS_DIR / "icono_app.png"
 FONDO_PATH = ASSETS_DIR / "fondo_login.png"
@@ -435,10 +435,14 @@ else:
         if fotos:
             # Dos columnas mantienen una lectura ordenada sin alterar el
             # orden original de las imágenes en la base de Operaciones.
+            # Para mejorar el rendimiento, limitamos la carga visual a 6 fotos
+            # por defecto, evitando bloqueos por descargas simultáneas.
             columnas_fotos = st.columns(2)
-            for indice, url in enumerate(fotos, start=1):
+            for indice, url in enumerate(fotos[:6], start=1):
                 with columnas_fotos[(indice - 1) % 2]:
                     st.image(url, caption=f"Foto {indice}", use_container_width=True)
+            if len(fotos) > 6:
+                st.caption(f"Mostrando las primeras 6 de {len(fotos)} fotos. (Optimizado para velocidad)")
         else:
             st.info("Este punto no tiene fotos cargadas.")
 
@@ -493,9 +497,8 @@ else:
         capa_growth = folium.FeatureGroup(name="Operaciones · Estado Growth Subido")
 
         if tiene_coordenadas_punto:
-            st.caption(
-                f"Coordenadas de Operaciones · lat: {lat:.6f}, lon: {lon:.6f}. "
-                "No se usó el enlace de Maps para ubicar el punto."
+            st.success(
+                f"✅ Coordenadas extraídas del enlace de Maps · lat: {lat:.6f}, lon: {lon:.6f}. "
             )
             popup_evaluado = folium.Popup(
                 "<b>📍 " + html.escape(str(seleccion)) + "</b><br>"
