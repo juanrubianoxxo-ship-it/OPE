@@ -13,9 +13,21 @@ from src.geo_utils import buscar_cercanos
 from src.puntos_potenciales import load_puntos_potenciales, buscar_puntos_potenciales_cercanos
 from src.pdf_report import generar_informe_pdf
 
+import os
+from pathlib import Path
+
+ASSETS_DIR = Path("src/assets")
+LOGO_PATH = ASSETS_DIR / "logo_oxxo_simil.png"
+ICONO_PATH = ASSETS_DIR / "icono_app.png"
+FONDO_PATH = ASSETS_DIR / "fondo_login.png"
+
+page_icon_src = None
+if ICONO_PATH.exists():
+    page_icon_src = str(ICONO_PATH)
+
 st.set_page_config(
     page_title="Puntos evaluados vs. tiendas vigentes",
-    page_icon="📍",
+    page_icon=str(page_icon_src) if page_icon_src else "📍",
     layout="wide",
 )
 
@@ -155,6 +167,9 @@ st.markdown(
 
 # ---------------------------------------------------------------- Sidebar --
 with st.sidebar:
+    if LOGO_PATH.exists():
+        st.image(str(LOGO_PATH), use_container_width=True)
+    
     st.title("📍 Panel de control")
 
     if st.button("🔄 Recargar datos (Excel del repo)", use_container_width=True):
@@ -429,6 +444,8 @@ else:
 
     st.divider()
     st.subheader("Ubicación en el mapa")
+    if FONDO_PATH.exists():
+        st.markdown(f'<div style="background-image: url("{str(FONDO_PATH)}"); background-size: cover; background-position: center; padding: 10px; border-radius: 10px;">', unsafe_allow_html=True)
     st.caption("Haz clic en cualquier punto del mapa para ver su información.")
 
     # La ubicación del punto se toma exclusivamente de columnas explícitas
@@ -487,10 +504,14 @@ else:
                 "Dirección: " + html.escape(str(fila_visita.get("Dirección", ""))),
                 max_width=300,
             )
+            if ICONO_PATH.exists():
+                custom_icon = folium.CustomIcon(str(ICONO_PATH), icon_size=(32, 32))
+            else:
+                custom_icon = folium.Icon(color="blue", icon="star")
             folium.Marker(
                 [lat, lon],
                 popup=popup_evaluado,
-                icon=folium.Icon(color="blue", icon="star"),
+                icon=custom_icon,
             ).add_to(m)
 
             # Solo se consideran tiendas ABIERTAS y se conservan ordenadas
@@ -574,6 +595,8 @@ else:
             "Estado Growth = Subido. Usa el control superior derecho para ocultar capas."
         )
         st_folium(m, use_container_width=True, height=500, returned_objects=[])
+        if FONDO_PATH.exists():
+            st.markdown('</div>', unsafe_allow_html=True)
     else:
         st.warning(
             "Este punto no tiene coordenadas explícitas en la hoja "
