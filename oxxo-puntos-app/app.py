@@ -262,8 +262,13 @@ visitas = visitas_full.copy()
 
 n_subidos_ocultos = 0
 if not mostrar_subidos:
-    n_subidos_ocultos = int(visitas["ID"].isin(subidos_ids).sum())
-    visitas = visitas[~visitas["ID"].isin(subidos_ids)]
+    # Filtrar usando el estado Growth directamente de la base de Operaciones
+    estado_growth = visitas.get(
+        "Estado Growth", pd.Series("", index=visitas.index, dtype=object)
+    ).fillna("").astype(str).str.strip().str.casefold()
+    
+    n_subidos_ocultos = int((estado_growth == "subido").sum())
+    visitas = visitas[estado_growth != "subido"]
 
 if visitas.empty:
     st.warning("No hay puntos evaluados que cumplan con los filtros seleccionados.")
