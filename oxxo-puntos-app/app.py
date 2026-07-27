@@ -312,7 +312,7 @@ if page == "🔍 Comparación de nombres":
     cols_mostrar = [
         "ID", "Nombre del Punto", "Jefe de zona", "Región", "Plaza",
         "Estado visita", "Mejor coincidencia", "Estado tienda", "Score",
-        "Posible duplicado", "Subido",
+        "Posible duplicado", "Subido"
     ]
     st.dataframe(
         tabla[cols_mostrar].style.apply(resaltar, axis=1),
