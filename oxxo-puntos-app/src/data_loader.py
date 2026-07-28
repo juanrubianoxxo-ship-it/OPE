@@ -69,10 +69,7 @@ def _add_visit_coordinates(df: pd.DataFrame) -> tuple[str | None, str | None]:
     Agrega las columnas normalizadas ``lat`` y ``lon``.
 
     Prioridad de fuentes:
-    1. Columnas Y (latitud) y X (longitud) explícitas en el Excel
-    2. Enlace de Google Maps (parseo + resolución de links cortos)
-    3. Enlace de Bing Maps
-    4. Geocodificación por dirección con Nominatim
+    1. Enlace de Google Maps (parseo + resolución de links cortos)
     """
     df["lat"] = pd.Series(float("nan"), index=df.index, dtype="float64")
     df["lon"] = pd.Series(float("nan"), index=df.index, dtype="float64")
@@ -80,20 +77,7 @@ def _add_visit_coordinates(df: pd.DataFrame) -> tuple[str | None, str | None]:
     maps_col = None
     address_col = None
 
-    # --- FUENTE 1: Columnas Y (lat) y X (lon) explícitas ---
-    tiene_y = "Y" in df.columns
-    tiene_x = "X" in df.columns
-    usar_xy = tiene_y and tiene_x
-
-    if usar_xy:
-        # Convertir Y y X a numérico
-        df["lat"] = pd.to_numeric(df["Y"], errors="coerce")
-        df["lon"] = pd.to_numeric(df["X"], errors="coerce")
-        # Validar rango
-        valid = df["lat"].between(-90, 90) & df["lon"].between(-180, 180)
-        df.loc[~valid, ["lat", "lon"]] = float("nan")
-
-    # --- FUENTE 2: Enlace de Google Maps ---
+    # --- FUENTE 1: Enlace de Google Maps ---
     # Buscar la columna de Maps
     for col in df.columns:
         if isinstance(col, str):
@@ -115,80 +99,26 @@ def _add_visit_coordinates(df: pd.DataFrame) -> tuple[str | None, str | None]:
                 address_col = col
                 break
 
-    # Si la fuente 1 no cubrió todos, completar con Maps
-    sin_coordenadas = df["lat"].isna()
-    if maps_col and sin_coordenadas.any():
-        # Intentamos leer hipervínculos de Excel usando openpyxl en modo normal
-        # (read_only=False para evitar errores de atributo)
-        try:
-            from openpyxl import load_workbook
-            wb = load_workbook(VISITAS_PATH, read_only=False, data_only=True)
-            ws = wb['Visitas_Operaciones']
-            
-            maps_col_idx = None
-            id_col_idx = None
-            for idx, col in enumerate(ws[1]):
-                if isinstance(col.value, str) and ("maps" in col.value.lower() or "ubicación" in col.value.lower()):
-                    maps_col_idx = idx
-                if isinstance(col.value, str) and "id" in col.value.lower():
-                    id_col_idx = idx
-                    
-            if maps_col_idx is not None:
-                for row in ws.iter_rows(min_row=2, values_only=False):
-                    try:
-                        cell = row[maps_col_idx]
-                        if cell.hyperlink and cell.hyperlink.target:
-                            import re
-                            target = cell.hyperlink.target
-                            lat, lon = None, None
-                            match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', target)
-                            if match:
-                                lat, lon = float(match.group(1)), float(match.group(2))
-                            match = re.search(r'/@(-?\d+\.\d+),(-?\d+\.\d+)', target)
-                            if match:
-                                lat, lon = float(match.group(1)), float(match.group(2))
-                            match = re.search(r'!1d(-?\d+\.\d+)!2d(-?\d+\.\d+)', target)
-                            if match:
-                                lat, lon = float(match.group(1)), float(match.group(2))
-                            match = re.search(r'!2d(-?\d+\.\d+)!3d(-?\d+\.\d+)', target)
-                            if match:
-                                lat, lon = float(match.group(1)), float(match.group(2))
-                                
-                            if lat is not None and lon is not None:
-                                if id_col_idx is not None:
-                                    id_val = row[id_col_idx].value
-                                    if id_val is not None:
-                                        matching_idx = df[df['ID'] == str(id_val)].index
-                                        if len(matching_idx) > 0:
-                                            df.at[matching_idx[0], "lat"] = lat
-                                            df.at[matching_idx[0], "lon"] = lon
-                    except Exception:
-                        continue
-            wb.close()
-        except Exception:
-            pass
-        
-        # Si aún hay sin coordenadas, usamos el método tradicional
-        sin_coordenadas = df["lat"].isna()
-        if sin_coordenadas.any():
-            from src.maps_utils import get_coordinates, geocode_address
+    # Completar con Maps
+    if maps_col:
+        from src.maps_utils import get_coordinates, geocode_address
 
-            for idx, row in df[sin_coordenadas].iterrows():
-                maps_link = row.get(maps_col, "")
-                address = row.get(address_col, "") if address_col else ""
-                if not isinstance(maps_link, str) or not maps_link.strip():
-                    if isinstance(address, str) and address.strip():
-                        coords = geocode_address(address)
-                        if coords:
-                            df.at[idx, "lat"] = coords[0]
-                            df.at[idx, "lon"] = coords[1]
-                    continue
-                lat, lon, _ = get_coordinates(
-                    maps_link, address if isinstance(address, str) else ""
-                )
-                if lat is not None and lon is not None:
-                    df.at[idx, "lat"] = lat
-                    df.at[idx, "lon"] = lon
+        for idx, row in df.iterrows():
+            maps_link = row.get(maps_col, "")
+            address = row.get(address_col, "") if address_col else ""
+            if not isinstance(maps_link, str) or not maps_link.strip():
+                if isinstance(address, str) and address.strip():
+                    coords = geocode_address(address)
+                    if coords:
+                        df.at[idx, "lat"] = coords[0]
+                        df.at[idx, "lon"] = coords[1]
+                continue
+            lat, lon, _ = get_coordinates(
+                maps_link, address if isinstance(address, str) else ""
+            )
+            if lat is not None and lon is not None:
+                df.at[idx, "lat"] = lat
+                df.at[idx, "lon"] = lon
 
     # Validación final
     valid = df["lat"].between(-90, 90) & df["lon"].between(-180, 180)
