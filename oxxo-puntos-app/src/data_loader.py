@@ -118,48 +118,55 @@ def _add_visit_coordinates(df: pd.DataFrame) -> tuple[str | None, str | None]:
     # Si la fuente 1 no cubrió todos, completar con Maps
     sin_coordenadas = df["lat"].isna()
     if maps_col and sin_coordenadas.any():
-        # Primero intentamos leer hipervínculos de Excel directamente
-        from openpyxl import load_workbook
-        wb = load_workbook(VISITAS_PATH, read_only=True)
-        ws = wb['Visitas_Operaciones']
-        
-        maps_col_idx = None
-        id_col_idx = None
-        for idx, col in enumerate(ws[1]):
-            if isinstance(col.value, str) and ("maps" in col.value.lower() or "ubicación" in col.value.lower()):
-                maps_col_idx = idx
-            if isinstance(col.value, str) and "id" in col.value.lower():
-                id_col_idx = idx
-                
-        if maps_col_idx is not None:
-            for row in ws.iter_rows(min_row=2, values_only=False):
-                cell = row[maps_col_idx]
-                if cell.hyperlink and cell.hyperlink.target:
-                    import re
-                    target = cell.hyperlink.target
-                    lat, lon = None, None
-                    match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', target)
-                    if match:
-                        lat, lon = float(match.group(1)), float(match.group(2))
-                    match = re.search(r'/@(-?\d+\.\d+),(-?\d+\.\d+)', target)
-                    if match:
-                        lat, lon = float(match.group(1)), float(match.group(2))
-                    match = re.search(r'!1d(-?\d+\.\d+)!2d(-?\d+\.\d+)', target)
-                    if match:
-                        lat, lon = float(match.group(1)), float(match.group(2))
-                    match = re.search(r'!2d(-?\d+\.\d+)!3d(-?\d+\.\d+)', target)
-                    if match:
-                        lat, lon = float(match.group(1)), float(match.group(2))
-                        
-                    if lat is not None and lon is not None:
-                        if id_col_idx is not None:
-                            id_val = row[id_col_idx].value
-                            if id_val is not None:
-                                matching_idx = df[df['ID'] == str(id_val)].index
-                                if len(matching_idx) > 0:
-                                    df.at[matching_idx[0], "lat"] = lat
-                                    df.at[matching_idx[0], "lon"] = lon
-        wb.close()
+        # Intentamos leer hipervínculos de Excel usando openpyxl en modo normal
+        # (read_only=False para evitar errores de atributo)
+        try:
+            from openpyxl import load_workbook
+            wb = load_workbook(VISITAS_PATH, read_only=False, data_only=True)
+            ws = wb['Visitas_Operaciones']
+            
+            maps_col_idx = None
+            id_col_idx = None
+            for idx, col in enumerate(ws[1]):
+                if isinstance(col.value, str) and ("maps" in col.value.lower() or "ubicación" in col.value.lower()):
+                    maps_col_idx = idx
+                if isinstance(col.value, str) and "id" in col.value.lower():
+                    id_col_idx = idx
+                    
+            if maps_col_idx is not None:
+                for row in ws.iter_rows(min_row=2, values_only=False):
+                    try:
+                        cell = row[maps_col_idx]
+                        if cell.hyperlink and cell.hyperlink.target:
+                            import re
+                            target = cell.hyperlink.target
+                            lat, lon = None, None
+                            match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', target)
+                            if match:
+                                lat, lon = float(match.group(1)), float(match.group(2))
+                            match = re.search(r'/@(-?\d+\.\d+),(-?\d+\.\d+)', target)
+                            if match:
+                                lat, lon = float(match.group(1)), float(match.group(2))
+                            match = re.search(r'!1d(-?\d+\.\d+)!2d(-?\d+\.\d+)', target)
+                            if match:
+                                lat, lon = float(match.group(1)), float(match.group(2))
+                            match = re.search(r'!2d(-?\d+\.\d+)!3d(-?\d+\.\d+)', target)
+                            if match:
+                                lat, lon = float(match.group(1)), float(match.group(2))
+                                
+                            if lat is not None and lon is not None:
+                                if id_col_idx is not None:
+                                    id_val = row[id_col_idx].value
+                                    if id_val is not None:
+                                        matching_idx = df[df['ID'] == str(id_val)].index
+                                        if len(matching_idx) > 0:
+                                            df.at[matching_idx[0], "lat"] = lat
+                                            df.at[matching_idx[0], "lon"] = lon
+                    except Exception:
+                        continue
+            wb.close()
+        except Exception:
+            pass
         
         # Si aún hay sin coordenadas, usamos el método tradicional
         sin_coordenadas = df["lat"].isna()
