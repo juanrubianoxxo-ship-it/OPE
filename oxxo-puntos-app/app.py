@@ -456,10 +456,44 @@ else:
     if tiene_coordenadas_punto:
         lat, lon = float(lat), float(lon)
 
-    # Todos los puntos de Operaciones con coordenadas extraídas del enlace de Maps
-    puntos_operacion_mapeables = visitas_full[
+    # Todos los puntos de Operaciones con coordenadas verificadas.
+    mascara_coordenadas_validas = (
         visitas_full["lat"].notna() & visitas_full["lon"].notna()
-    ].copy()
+        & visitas_full["lat"].between(-90, 90)
+        & visitas_full["lon"].between(-180, 180)
+    )
+    puntos_operacion_mapeables = visitas_full[mascara_coordenadas_validas].copy()
+    puntos_operacion_sin_ubicacion = visitas_full[~mascara_coordenadas_validas].copy()
+
+    n_operaciones_mapeables = len(puntos_operacion_mapeables)
+    n_operaciones_sin_ubicacion = len(puntos_operacion_sin_ubicacion)
+    if n_operaciones_sin_ubicacion:
+        st.warning(
+            f"El mapa muestra {n_operaciones_mapeables} de {len(visitas_full)} "
+            "operaciones con coordenadas verificadas. "
+            f"{n_operaciones_sin_ubicacion} registro(s) se excluyen para evitar "
+            "ubicarlos en un punto incorrecto."
+        )
+        with st.expander("Ver registros sin ubicación verificable"):
+            columnas_diagnostico = [
+                "ID", "Nombre del Punto", "Enlace de la ubicación en Google Maps",
+                "Dirección", "diagnostico_ubicacion",
+            ]
+            columnas_diagnostico = [
+                columna for columna in columnas_diagnostico
+                if columna in puntos_operacion_sin_ubicacion.columns
+            ]
+            tabla_diagnostico = puntos_operacion_sin_ubicacion[columnas_diagnostico].copy()
+            tabla_diagnostico = tabla_diagnostico.rename(columns={
+                "diagnostico_ubicacion": "Diagnóstico de ubicación",
+                "Enlace de la ubicación en Google Maps": "Enlace leído",
+            })
+            st.dataframe(tabla_diagnostico, use_container_width=True, hide_index=True)
+    else:
+        st.success(
+            f"✅ Las {n_operaciones_mapeables} operaciones tienen coordenadas "
+            "verificadas y se muestran en el mapa."
+        )
 
     # Puntos con Estado Growth = Subido y coordenadas
     estado_growth_full = visitas_full.get(
