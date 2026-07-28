@@ -1,16 +1,17 @@
-"""
-Carga y normalización de las bases de datos de la aplicación.
+"""Carga y normalización de las bases de datos de la aplicación.
 
-- ``Book.xlsx`` (hoja ``JUN``): tiendas vigentes con coordenadas X/Y.
-- ``Operaciones_ult_semana.xlsm`` (hoja ``Visitas_Operaciones``): puntos
-  evaluados. Se usan las coordenadas de las columnas Y (latitud) y X (longitud)
-  si existen; si no, se extraen del enlace de Google Maps usando la cascada
-  de maps_utils.py.
+``Operaciones_ult_semana.xlsm`` puede contener enlaces de mapa como texto,
+hipervínculos de Excel o fórmulas ``HYPERLINK``. La carga conserva el destino
+real del enlace, obtiene coordenadas en el orden latitud/longitud y registra la
+fuente usada para que el mapa sólo reciba ubicaciones verificables.
 """
 from __future__ import annotations
 
 import os
-from typing import Iterable
+import re
+import unicodedata
+from collections import Counter
+from typing import Any
 
 import pandas as pd
 import streamlit as st
@@ -18,8 +19,10 @@ import streamlit as st
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BOOK_PATH = os.path.join(BASE_DIR, "data", "Book.xlsx")
 VISITAS_PATH = os.path.join(BASE_DIR, "data", "Operaciones_ult_semana.xlsm")
+VISITAS_SHEET = "Visitas_Operaciones"
 
 ESTADOS_VIGENTES = ["ABIERTA", "OBRA", "FIRMADA"]
+MAPS_COLUMN_STD = "Enlace de la ubicación en Google Maps"
 
 TIENDAS_COLS = [
     "NAME", "ESTADO", "PLAZA 2026", "DEPARTAMENTO", "MUNICIPIO",
@@ -36,164 +39,217 @@ VISITAS_RENAME = {
     " RENTA UM": "RENTA UM",
 }
 
-# Nombre de columna estándar para el filtro de fecha de la interfaz.
 DATE_COLUMN_STD = "Fecha"
 DATE_COLUMN_HINTS = ["fecha de visita", "fecha visita", "fecha de la visita", "fecha"]
 
 
-def _file_signature(path: str):
-    """mtime + size para invalidar el caché cuando se reemplaza un Excel."""
+def _file_signature(path: str) -> tuple[str, float, int]:
+    """Devuelve metadatos que cambian cuando se reemplaza un libro."""
     stat = os.stat(path)
-    return (path, stat.st_mtime, stat.st_size)
+    return path, stat.st_mtime, stat.st_size
 
 
-def _find_date_column(df: pd.DataFrame):
-    """Encuentra una columna de fecha en ``Visitas_Operaciones``."""
-    cols_lower = {c.lower().strip(): c for c in df.columns if isinstance(c, str)}
+def _normalizar_encabezado(value: object) -> str:
+    """Normaliza variantes de encabezados con espacios, tildes y guiones."""
+    text = unicodedata.normalize("NFKD", str(value or ""))
+    text = "".join(char for char in text if not unicodedata.combining(char))
+    return "".join(text.casefold().strip().replace("_", " ").replace("-", " ").split())
+
+
+def _find_date_column(df: pd.DataFrame) -> str | None:
+    """Encuentra una columna de fecha en la hoja de operaciones."""
+    cols_lower = {_normalizar_encabezado(c): c for c in df.columns if isinstance(c, str)}
     for hint in DATE_COLUMN_HINTS:
-        if hint in cols_lower:
-            return cols_lower[hint]
-    for lower, original in cols_lower.items():
-        if "fecha" in lower:
+        normalized_hint = _normalizar_encabezado(hint)
+        if normalized_hint in cols_lower:
+            return cols_lower[normalized_hint]
+    for normalized, original in cols_lower.items():
+        if "fecha" in normalized:
             return original
     return None
 
 
-def _normalizar_encabezado(value: object) -> str:
-    """Normaliza un encabezado para comparar variantes de escritura."""
-    return "".join(str(value).casefold().strip().replace("_", " ").split())
+def _find_maps_column(columns: list[object]) -> str | None:
+    """Localiza la columna de enlaces aun cuando cambie levemente el título."""
+    expected = _normalizar_encabezado(MAPS_COLUMN_STD)
+    for column in columns:
+        if _normalizar_encabezado(column) == expected:
+            return column if isinstance(column, str) else None
+    for column in columns:
+        normalized = _normalizar_encabezado(column)
+        if "enlace" in normalized and ("googlemaps" in normalized or "maps" in normalized):
+            return column if isinstance(column, str) else None
+    for column in columns:
+        normalized = _normalizar_encabezado(column)
+        if "maps" in normalized or "ubicacion" in normalized:
+            return column if isinstance(column, str) else None
+    return None
+
+
+def _find_address_column(columns: list[object]) -> str | None:
+    for column in columns:
+        normalized = _normalizar_encabezado(column)
+        if normalized in {"direccion", "address", "direcciondelpunto"} or "direccion" in normalized:
+            return column if isinstance(column, str) else None
+    return None
+
+
+def _cell_to_text(value: object) -> str:
+    """Convierte una celda en texto sin transformar vacíos en la palabra nan."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip()
+
+
+def _formula_hyperlink_target(value: object) -> str:
+    """Extrae el primer argumento de una fórmula HYPERLINK/HIPERVINCULO."""
+    text = _cell_to_text(value)
+    if not text or not re.match(r"^=\s*(?:HYPERLINK|HIPERVINCULO)\s*\(", text, flags=re.IGNORECASE):
+        return ""
+    match = re.search(r"^=\s*(?:HYPERLINK|HIPERVINCULO)\s*\(\s*\"([^\"]+)\"", text, flags=re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def _target_from_excel_cell(cell: Any) -> str:
+    """Obtiene el destino real de una celda hipervinculada de Excel."""
+    hyperlink = getattr(cell, "hyperlink", None)
+    if hyperlink is not None:
+        target = _cell_to_text(getattr(hyperlink, "target", None))
+        if target:
+            return target
+        location = _cell_to_text(getattr(hyperlink, "location", None))
+        if location:
+            return location
+    formula_target = _formula_hyperlink_target(getattr(cell, "value", None))
+    if formula_target:
+        return formula_target
+    raw_value = _cell_to_text(getattr(cell, "value", None))
+    if raw_value.casefold().startswith(("https://", "http://", "www.")):
+        return raw_value
+    return ""
+
+
+def _read_excel_hyperlink_targets() -> tuple[dict[int, str], str | None]:
+    """Lee destinos de hipervínculos sin ejecutar macros del libro XLSM.
+
+    Las claves del resultado son números de fila de Excel (la primera fila de
+    datos es la 2). Se usa esa relación posicional para que IDs duplicados o
+    formateados de manera distinta no asocien una ubicación a otro registro.
+    """
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(
+        VISITAS_PATH,
+        read_only=False,
+        data_only=False,
+        keep_vba=True,
+    )
+    try:
+        if VISITAS_SHEET not in workbook.sheetnames:
+            return {}, None
+        worksheet = workbook[VISITAS_SHEET]
+        headers = [cell.value for cell in worksheet[1]]
+        maps_header = _find_maps_column(headers)
+        if maps_header is None:
+            return {}, None
+        maps_index = next(
+            index for index, header in enumerate(headers, start=1)
+            if _normalizar_encabezado(header) == _normalizar_encabezado(maps_header)
+        )
+        targets: dict[int, str] = {}
+        for excel_row in range(2, worksheet.max_row + 1):
+            target = _target_from_excel_cell(worksheet.cell(row=excel_row, column=maps_index))
+            if target:
+                targets[excel_row] = target
+        return targets, maps_header
+    finally:
+        workbook.close()
 
 
 def _add_visit_coordinates(df: pd.DataFrame) -> tuple[str | None, str | None]:
-    """
-    Agrega las columnas normalizadas ``lat`` y ``lon``.
+    """Agrega ``lat``/``lon`` y auditoría de la fuente de cada ubicación.
 
-    Prioridad de fuentes:
-    1. Columnas Y (latitud) y X (longitud) explícitas en el Excel
-    2. Enlace de Google Maps (parseo + resolución de links cortos)
-    3. Enlace de Bing Maps
-    4. Geocodificación por dirección con Nominatim
+    La prioridad es: columnas explícitas Y/X válidas, enlace de mapa real
+    (incluido el destino de hipervínculos de Excel) y, por último,
+    geocodificación de dirección. Un registro sólo se considera mapeable si
+    dispone de **ambas** coordenadas dentro de rangos geográficos válidos.
     """
+    maps_col = _find_maps_column(list(df.columns))
+    address_col = _find_address_column(list(df.columns))
+
+    # Conservar una columna estándar para el botón y el detalle de la app.
+    if maps_col and maps_col != MAPS_COLUMN_STD:
+        if MAPS_COLUMN_STD not in df.columns:
+            df.rename(columns={maps_col: MAPS_COLUMN_STD}, inplace=True)
+            maps_col = MAPS_COLUMN_STD
+        else:
+            df[MAPS_COLUMN_STD] = df[MAPS_COLUMN_STD].where(
+                df[MAPS_COLUMN_STD].notna(), df[maps_col]
+            )
+            maps_col = MAPS_COLUMN_STD
+
     df["lat"] = pd.Series(float("nan"), index=df.index, dtype="float64")
     df["lon"] = pd.Series(float("nan"), index=df.index, dtype="float64")
+    df["fuente_coordenadas"] = pd.Series("Sin coordenadas", index=df.index, dtype="object")
+    df["enlace_maps_leido"] = pd.Series("", index=df.index, dtype="object")
 
-    maps_col = None
-    address_col = None
+    # Extraer la URL real de hipervínculos, fórmulas y URLs escritas como texto.
+    excel_targets: dict[int, str] = {}
+    try:
+        excel_targets, _ = _read_excel_hyperlink_targets()
+    except Exception:
+        # La columna visible todavía funciona como fuente de respaldo si el
+        # archivo contiene una extensión no soportada por openpyxl.
+        excel_targets = {}
 
-    # --- FUENTE 1: Columnas Y (lat) y X (lon) explícitas ---
-    tiene_y = "Y" in df.columns
-    tiene_x = "X" in df.columns
-    usar_xy = tiene_y and tiene_x
+    if maps_col:
+        visible_links = df[maps_col].map(_cell_to_text)
+        hyperlink_links = df["_fila_excel"].map(excel_targets).fillna("").map(_cell_to_text)
+        effective_links = hyperlink_links.where(hyperlink_links.ne(""), visible_links)
+        df["enlace_maps_leido"] = effective_links
+        # El detalle debe abrir la URL, no el texto visible del hipervínculo.
+        df[maps_col] = effective_links
 
-    if usar_xy:
-        # Convertir Y y X a numérico
-        df["lat"] = pd.to_numeric(df["Y"], errors="coerce")
-        df["lon"] = pd.to_numeric(df["X"], errors="coerce")
-        # Validar rango
-        valid = df["lat"].between(-90, 90) & df["lon"].between(-180, 180)
-        df.loc[~valid, ["lat", "lon"]] = float("nan")
+    # Fuente 1: Y es latitud y X es longitud, pero sólo si ambos valores son
+    # válidos. Si uno falta, el enlace sí puede completar la ubicación.
+    if "Y" in df.columns and "X" in df.columns:
+        latitude_xy = pd.to_numeric(df["Y"], errors="coerce")
+        longitude_xy = pd.to_numeric(df["X"], errors="coerce")
+        xy_valid = latitude_xy.between(-90, 90) & longitude_xy.between(-180, 180)
+        df.loc[xy_valid, "lat"] = latitude_xy.loc[xy_valid]
+        df.loc[xy_valid, "lon"] = longitude_xy.loc[xy_valid]
+        df.loc[xy_valid, "fuente_coordenadas"] = "Columnas Y/X de Operaciones"
 
-    # --- FUENTE 2: Enlace de Google Maps ---
-    # Buscar la columna de Maps
-    for col in df.columns:
-        if isinstance(col, str):
-            col_lower = col.lower().strip()
-            if "enlace" in col_lower and "maps" in col_lower:
-                maps_col = col
-                break
-    if maps_col is None:
-        for col in df.columns:
-            if isinstance(col, str) and "maps" in col.lower():
-                maps_col = col
-                break
+    # Fuente 2 y 3: link real y dirección. Se atienden de forma acotada para
+    # que los  enlaces cortos no bloqueen el mapa durante una recarga.
+    needs_coordinates = df["lat"].isna() | df["lon"].isna()
+    if needs_coordinates.any():
+        from src.maps_utils import get_coordinates_batch
 
-    # Buscar columna de dirección para respaldo
-    for col in df.columns:
-        if isinstance(col, str):
-            col_lower = col.lower().strip()
-            if "dirección" in col_lower or "direccion" in col_lower or "address" in col_lower:
-                address_col = col
-                break
+        records = []
+        for index, row in df.loc[needs_coordinates].iterrows():
+            link = _cell_to_text(row.get("enlace_maps_leido", ""))
+            address = _cell_to_text(row.get(address_col, "")) if address_col else ""
+            records.append((index, link, address))
 
-    # Si la fuente 1 no cubrió todos, completar con Maps
-    sin_coordenadas = df["lat"].isna()
-    if maps_col and sin_coordenadas.any():
-        # Intentamos leer hipervínculos de Excel usando openpyxl en modo normal
-        # (read_only=False para evitar errores de atributo)
-        try:
-            from openpyxl import load_workbook
-            wb = load_workbook(VISITAS_PATH, read_only=False, data_only=True)
-            ws = wb['Visitas_Operaciones']
-            
-            maps_col_idx = None
-            id_col_idx = None
-            for idx, col in enumerate(ws[1]):
-                if isinstance(col.value, str) and ("maps" in col.value.lower() or "ubicación" in col.value.lower()):
-                    maps_col_idx = idx
-                if isinstance(col.value, str) and "id" in col.value.lower():
-                    id_col_idx = idx
-                    
-            if maps_col_idx is not None:
-                for row in ws.iter_rows(min_row=2, values_only=False):
-                    try:
-                        cell = row[maps_col_idx]
-                        if cell.hyperlink and cell.hyperlink.target:
-                            import re
-                            target = cell.hyperlink.target
-                            lat, lon = None, None
-                            match = re.search(r'@(-?\d+\.\d+),(-?\d+\.\d+)', target)
-                            if match:
-                                lat, lon = float(match.group(1)), float(match.group(2))
-                            match = re.search(r'/@(-?\d+\.\d+),(-?\d+\.\d+)', target)
-                            if match:
-                                lat, lon = float(match.group(1)), float(match.group(2))
-                            match = re.search(r'!1d(-?\d+\.\d+)!2d(-?\d+\.\d+)', target)
-                            if match:
-                                lat, lon = float(match.group(1)), float(match.group(2))
-                            match = re.search(r'!2d(-?\d+\.\d+)!3d(-?\d+\.\d+)', target)
-                            if match:
-                                lat, lon = float(match.group(1)), float(match.group(2))
-                                
-                            if lat is not None and lon is not None:
-                                if id_col_idx is not None:
-                                    id_val = row[id_col_idx].value
-                                    if id_val is not None:
-                                        matching_idx = df[df['ID'] == str(id_val)].index
-                                        if len(matching_idx) > 0:
-                                            df.at[matching_idx[0], "lat"] = lat
-                                            df.at[matching_idx[0], "lon"] = lon
-                    except Exception:
-                        continue
-            wb.close()
-        except Exception:
-            pass
-        
-        # Si aún hay sin coordenadas, usamos el método tradicional
-        sin_coordenadas = df["lat"].isna()
-        if sin_coordenadas.any():
-            from src.maps_utils import get_coordinates, geocode_address
+        for index, (latitude, longitude, source) in get_coordinates_batch(records).items():
+            if latitude is not None and longitude is not None:
+                df.at[index, "lat"] = latitude
+                df.at[index, "lon"] = longitude
+            df.at[index, "fuente_coordenadas"] = source
 
-            for idx, row in df[sin_coordenadas].iterrows():
-                maps_link = row.get(maps_col, "")
-                address = row.get(address_col, "") if address_col else ""
-                if not isinstance(maps_link, str) or not maps_link.strip():
-                    if isinstance(address, str) and address.strip():
-                        coords = geocode_address(address)
-                        if coords:
-                            df.at[idx, "lat"] = coords[0]
-                            df.at[idx, "lon"] = coords[1]
-                    continue
-                lat, lon, _ = get_coordinates(
-                    maps_link, address if isinstance(address, str) else ""
-                )
-                if lat is not None and lon is not None:
-                    df.at[idx, "lat"] = lat
-                    df.at[idx, "lon"] = lon
-
-    # Validación final
+    # Un valor parcial, intercambiado o fuera de rango nunca llega al mapa.
     valid = df["lat"].between(-90, 90) & df["lon"].between(-180, 180)
     df.loc[~valid, ["lat", "lon"]] = float("nan")
-
+    df["ubicacion_mapeable"] = valid
+    df["diagnostico_ubicacion"] = df["fuente_coordenadas"].where(
+        valid, df["fuente_coordenadas"].replace("Sin coordenadas", "Sin coordenadas válidas")
+    )
     return maps_col, address_col
 
 
@@ -202,61 +258,76 @@ def load_tiendas(_sig=None) -> pd.DataFrame:
     _file_signature(BOOK_PATH)
     df = pd.read_excel(BOOK_PATH, sheet_name="JUN")
     df.columns = [str(c).strip() for c in df.columns]
-    keep = [c for c in TIENDAS_COLS if c in df.columns]
+    keep = [column for column in TIENDAS_COLS if column in df.columns]
     df = df[keep].copy()
 
     df["ESTADO"] = df["ESTADO"].astype(str).str.strip().str.upper()
     df = df[df["ESTADO"].isin(ESTADOS_VIGENTES)].copy()
-
     df["NAME"] = df["NAME"].astype(str).str.strip()
     df = df[df["NAME"].ne("") & df["NAME"].ne("0")]
 
-    # X = longitud, Y = latitud en la base de tiendas.
     df["lat"] = pd.to_numeric(df["Y"], errors="coerce")
     df["lon"] = pd.to_numeric(df["X"], errors="coerce")
+    valid = df["lat"].between(-90, 90) & df["lon"].between(-180, 180)
+    df.loc[~valid, ["lat", "lon"]] = float("nan")
     return df.reset_index(drop=True)
 
 
 @st.cache_data(show_spinner="Cargando puntos evaluados (Operaciones)...")
 def load_visitas(_sig=None) -> pd.DataFrame:
-    """Carga Operaciones y deja ``lat``/``lon`` listos."""
+    """Carga Operaciones dejando coordenadas auditables y listas para el mapa."""
     _file_signature(VISITAS_PATH)
-    df = pd.read_excel(
-        VISITAS_PATH, sheet_name="Visitas_Operaciones", engine="openpyxl"
-    )
-    df.columns = [str(c) for c in df.columns]
+    df = pd.read_excel(VISITAS_PATH, sheet_name=VISITAS_SHEET, engine="openpyxl")
+    df.columns = [str(column) for column in df.columns]
     df = df.rename(columns=VISITAS_RENAME)
-    df.columns = [c.strip() if isinstance(c, str) else c for c in df.columns]
+    df.columns = [column.strip() if isinstance(column, str) else column for column in df.columns]
+    # Relación estable con la fila del archivo para leer el hiperlink correcto.
+    df["_fila_excel"] = df.index + 2
 
     if "Nombre del Punto" in df.columns:
         df["Nombre del Punto"] = df["Nombre del Punto"].astype(str).str.strip()
-        df = df[df["Nombre del Punto"].ne("") & df["Nombre del Punto"].ne("nan")]
+        df = df[df["Nombre del Punto"].ne("") & df["Nombre del Punto"].ne("nan")].copy()
 
     fecha_col = _find_date_column(df)
     if fecha_col is not None:
-        df[DATE_COLUMN_STD] = pd.to_datetime(
-            df[fecha_col], errors="coerce", dayfirst=True
-        )
+        df[DATE_COLUMN_STD] = pd.to_datetime(df[fecha_col], errors="coerce", dayfirst=True)
     else:
         df[DATE_COLUMN_STD] = pd.NaT
 
     if "ID" in df.columns:
-        df["ID"] = df["ID"].astype(str)
+        df["ID"] = df["ID"].astype(str).str.strip()
     elif "Nombre del Punto" in df.columns:
-        df["ID"] = df["Nombre del Punto"]
+        df["ID"] = df["Nombre del Punto"].astype(str)
     else:
         df["ID"] = df.index.astype(str)
 
     maps_col, address_col = _add_visit_coordinates(df)
+    summary = Counter(df["fuente_coordenadas"].fillna("Sin coordenadas"))
     df.attrs["coordinate_sources"] = {
         "maps_column": maps_col,
         "address_column": address_col,
-        "con_xy_y_x": ("Y" in df.columns and "X" in df.columns),
+        "con_xy_y_x": "Y" in df.columns and "X" in df.columns,
+        "total_registros": int(len(df)),
+        "mapeables": int(df["ubicacion_mapeable"].sum()),
+        "fuentes": dict(summary),
     }
-    return df.reset_index(drop=True)
+    return df.drop(columns=["_fila_excel"], errors="ignore").reset_index(drop=True)
 
 
-def reload_all():
-    """Fuerza la recarga de los Excel desde la interfaz."""
+def reload_all() -> None:
+    """Fuerza la recarga de los libros y de las redirecciones de mapas."""
     load_tiendas.clear()
     load_visitas.clear()
+    try:
+        from src.maps_utils import (
+            _verified_coordinate_cache,
+            geocode_address,
+            google_place_coordinates,
+            resolve_map_link,
+        )
+        resolve_map_link.cache_clear()
+        google_place_coordinates.cache_clear()
+        geocode_address.cache_clear()
+        _verified_coordinate_cache.cache_clear()
+    except Exception:
+        pass
