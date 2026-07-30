@@ -1,10 +1,20 @@
-"""Utilidades para interpretar y validar ubicaciones de mapas.
-
 La aplicación recibe enlaces que pueden ser URL completas de Google Maps,
 enlaces cortos ``maps.app.goo.gl``, URLs de Bing/Waze o hipervínculos de Excel
 cuyo texto visible no es la URL real. Este módulo extrae pares latitud/longitud
 sin invertirlos, resuelve redirecciones cuando es necesario y deja una fuente
 auditable para cada coordenada.
+
+Formatos soportados
+-------------------
+- ``maps.app.goo.gl/<id>`` → redirección a URL con ``q=lat,lon`` o con ``ftid``
+- ``google.com/maps/@lat,lon,zoom``
+- ``google.com/maps/place/...!3d<lat>!4d<lon>``
+- ``google.com/maps?q=lat,lon``
+- ``google.com/maps?q=<dirección>&ftid=<id>`` → geocodificación por dirección
+- ``maps.google.com/?q=lat,lon``
+- ``bing.com/maps?cp=lat~lon`` y ``ppois=lat_lon_...``
+- ``waze.com/ul?ll=lat,lon``
+- Cualquier URL con coordenadas explícitas en query string o path
 """
 from __future__ import annotations
 
@@ -20,22 +30,20 @@ from urllib.parse import parse_qs, unquote, unquote_plus, urlparse
 import requests
 import streamlit as st
 
-USER_AGENT = "oxxo-puntos-app/2.0 (contacto: equipo-expansion@oxxo.com)"
-REQUEST_TIMEOUT = (4, 10)
-# Las fichas de Google se consultan como respaldo de un identificador exacto;
-# un fallo debe degradar rápidamente al diagnóstico, no bloquear la interfaz.
-GOOGLE_PREVIEW_TIMEOUT = (3, 6)
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/124.0.0.0 Safari/537.36"
+)
+REQUEST_TIMEOUT = (5, 15)
+GOOGLE_PREVIEW_TIMEOUT = (4, 10)
 MAX_LINK_WORKERS = 6
 APP_ROOT = Path(__file__).resolve().parents[1]
 COORDINATE_CACHE_PATH = APP_ROOT / "data" / "maps_coordinate_cache.json"
 
-# Dominios de enlaces de ubicación que pueden requerir una redirección para
-# revelar las coordenadas. Se comparan contra el hostname, no con subcadenas.
 SHORT_LINK_DOMAINS = {"maps.app.goo.gl", "goo.gl"}
 MAP_HOST_HINTS = ("google.", "goo.gl", "share.google", "bing.com", "waze.com")
 
-# Llaves de query frecuentes para pares latitud,longitud. Incluye Google,
-# Bing y enlaces compartidos de aplicaciones móviles.
 COORD_QUERY_KEYS = (
     "q", "query", "ll", "destination", "origin", "center", "location",
     "coords", "coordinates", "latlng", "latlon",
@@ -43,12 +51,7 @@ COORD_QUERY_KEYS = (
 
 
 def _clean_url(value: object) -> str:
-    """Normaliza una URL preservando su contenido semántico.
-
-    Algunas celdas llevan texto descriptivo seguido de una URL compartida. En
-    ese caso se conserva únicamente la URL, que es la parte procesable y la
-    que debe abrir el botón de detalle.
-    """
+    """Normaliza una URL preservando su contenido semántico."""
     if not isinstance(value, str):
         return ""
     link = html_lib.unescape(value).replace("\u200b", "").strip()
@@ -58,9 +61,6 @@ def _clean_url(value: object) -> str:
     if link.casefold().startswith("www."):
         link = f"https://{link}"
 
-    # Outlook Safe Links encapsula la URL original como ?url=<URL codificada>.
-    # Se extrae antes de realizar solicitudes para no perder el Maps real ni
-    # depender de una página intermedia de protección.
     try:
         parsed = urlparse(link)
         if parsed.netloc.casefold().endswith("safelinks.protection.outlook.com"):
@@ -111,7 +111,6 @@ def _parse_coordinate_pair(value: object) -> tuple[float, float] | None:
     if not isinstance(value, str):
         return None
     text = unquote(value).strip()
-    # Soporta valores como ``geo:4.71,-74.07`` o ``loc:4.71,-74.07``.
     match = re.search(
         r"(?:geo:|loc:)?\s*(-?\d{1,2}(?:\.\d+)?)\s*[,~;]\s*"
         r"(-?\d{1,3}(?:\.\d+)?)",
@@ -128,8 +127,6 @@ def _parse_coords_from_text(value: object) -> tuple[float, float] | None:
     if not link:
         return None
 
-    # Se decodifica de forma repetida porque algunos enlaces contienen una URL
-    # anidada o parámetros que llegan doblemente codificados desde Excel.
     decoded = link
     for _ in range(2):
         next_value = unquote(decoded)
@@ -137,8 +134,8 @@ def _parse_coords_from_text(value: object) -> tuple[float, float] | None:
             break
         decoded = next_value
 
-    # Vista/resultado de Google Maps: .../@4.7101,-74.0721,15z
     patterns = (
+        # Vista/resultado de Google Maps: .../@4.7101,-74.0721,15z
         r"@\s*(-?\d{1,2}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)",
         # Pin exacto de Google Maps: !3d<lat>!4d<lon>
         r"!3d(-?\d{1,2}(?:\.\d+)?)!4d(-?\d{1,3}(?:\.\d+)?)",
@@ -150,6 +147,12 @@ def _parse_coords_from_text(value: object) -> tuple[float, float] | None:
         r"(?:[?&]|^)cp=(-?\d{1,2}(?:\.\d+)?)(?:~|%7[eE])(-?\d{1,3}(?:\.\d+)?)",
         # URL de Google Maps donde la coordenada aparece como parte de /place/.
         r"/place/\s*(-?\d{1,2}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)",
+        # Waze: ?ll=lat,lon
+        r"[?&]ll=(-?\d{1,2}(?:\.\d+)?)[,&](-?\d{1,3}(?:\.\d+)?)",
+        # Google Maps share: ?q=lat,lon (sin texto, solo números)
+        r"[?&]q=(-?\d{1,2}\.\d+),(-?\d{1,3}\.\d+)(?:[&\s]|$)",
+        # Coordenadas en el path: /4.7101,-74.0721
+        r"/(-?\d{1,2}\.\d{4,}),(-?\d{1,3}\.\d{4,})",
     )
     for pattern in patterns:
         match = re.search(pattern, decoded, flags=re.IGNORECASE)
@@ -158,8 +161,7 @@ def _parse_coords_from_text(value: object) -> tuple[float, float] | None:
             if coordinates:
                 return coordinates
 
-    # Consulta estándar y URLs con query anidada. ``parse_qs`` preserva el
-    # signo negativo y evita errores con parámetros adicionales de Google.
+    # Consulta estándar y URLs con query anidada.
     parsed = urlparse(decoded)
     query = parse_qs(parsed.query, keep_blank_values=False)
     for key in COORD_QUERY_KEYS:
@@ -168,8 +170,6 @@ def _parse_coords_from_text(value: object) -> tuple[float, float] | None:
             if coordinates:
                 return coordinates
 
-    # Como último intento, busca pares sólo cuando están precedidos por una
-    # llave conocida. Esto evita interpretar números arbitrarios del enlace.
     key_pattern = "|".join(re.escape(key) for key in COORD_QUERY_KEYS)
     match = re.search(
         rf"(?:[?&]|\\b)(?:{key_pattern})=([^&#]+)", decoded, flags=re.IGNORECASE
@@ -199,13 +199,17 @@ def _should_follow_redirects(url: str) -> bool:
 def _map_query_as_address(url: str) -> str:
     """Extrae una búsqueda o dirección legible de una URL final de mapas.
 
-    Un enlace compartido puede terminar en ``q=<dirección>&ftid=...``. Esa URL
-    sí identifica el lugar, aunque no tenga un par latitud/longitud; se usa
-    como respaldo antes de recurrir a la dirección libre de la hoja Excel.
+    Importante: se usa la URL **sin decodificar** para el regex del path porque
+    ``unquote()`` convierte ``%23`` en ``#``, y ``urlparse`` interpreta el ``#``
+    como inicio de fragmento, truncando la dirección. El match se decodifica
+    solo después de extraerlo.
     """
     link = _clean_url(url)
     if not link:
         return ""
+
+    # Para los parámetros de query se puede decodificar sin riesgo porque
+    # parse_qs ya maneja la decodificación internamente.
     decoded = link
     for _ in range(2):
         next_value = unquote(decoded)
@@ -219,14 +223,13 @@ def _map_query_as_address(url: str) -> str:
             candidate = candidate.strip()
             if not candidate or _parse_coordinate_pair(candidate):
                 continue
-            # Los IDs técnicos no se pueden geocodificar de forma fiable.
             if candidate.casefold().startswith(("place_id:", "cid:")):
                 continue
             return candidate
 
-    # Los enlaces ``/maps/place/<nombre>/data=...`` pueden no incluir q=, pero
-    # el nombre de la ficha sigue siendo un respaldo útil para geocodificación.
-    match = re.search(r"/(?:maps/)?place/([^/]+)", parsed.path, flags=re.IGNORECASE)
+    # Para el path se usa la URL original (sin decodificar) para evitar que
+    # %23 → # rompa el parseo de urlparse al interpretar # como fragmento.
+    match = re.search(r"/(?:maps/)?place/([^/]+)", link, flags=re.IGNORECASE)
     if match:
         candidate = unquote_plus(match.group(1)).strip()
         if candidate and not _parse_coordinate_pair(candidate):
@@ -249,12 +252,7 @@ def _google_place_id(url: str) -> str:
 
 
 def _google_preview_payload(place_id: str, label: str) -> str:
-    """Construye el parámetro de vista previa usado por una ficha pública.
-
-    El identificador del lugar es el dato decisivo. El centro inicial se fija
-    sobre Colombia sólo para completar el formato de la solicitud; la respuesta
-    se acepta únicamente si devuelve el mismo identificador de lugar.
-    """
+    """Construye el parámetro de vista previa usado por una ficha pública."""
     return (
         f"!1m15!1s{place_id}!2s{label[:500]}!3m12!1m3!1d100000!2d-74.0!3d4.6"
         "!2m3!1f0.0!2f0.0!3f0.0!3m2!1i1024!2i768!4f13.1"
@@ -263,13 +261,7 @@ def _google_preview_payload(place_id: str, label: str) -> str:
 
 @lru_cache(maxsize=2_000)
 def google_place_coordinates(url: str) -> tuple[float, float] | None:
-    """Obtiene el pin principal de una ficha pública de Google Maps.
-
-    Esta ruta sólo se ejecuta cuando el enlace ya identificó un lugar con
-    ``ftid``/``!1s`` pero no expuso latitud y longitud en su URL. La respuesta
-    se valida contra ese mismo ID antes de aceptar la pareja de coordenadas,
-    evitando confundirla con el centro de la vista o con lugares cercanos.
-    """
+    """Obtiene el pin principal de una ficha pública de Google Maps."""
     link = _clean_url(url)
     place_id = _google_place_id(link)
     if not link or not place_id or "google" not in _hostname(link):
@@ -298,8 +290,6 @@ def google_place_coordinates(url: str) -> tuple[float, float] | None:
         if response is not None:
             response.close()
 
-    # El bloque [null, null, lat, lon], inmediatamente seguido por el mismo
-    # ID de lugar, describe el pin principal de la ficha solicitada.
     pattern = re.compile(
         r"\[\s*null\s*,\s*null\s*,\s*"
         r"(-?\d{1,2}(?:\.\d+)?)\s*,\s*"
@@ -314,14 +304,76 @@ def google_place_coordinates(url: str) -> tuple[float, float] | None:
     return _valid_coordinates(match.group(1), match.group(2))
 
 
+def _extract_coords_from_html(html_body: str) -> tuple[float, float] | None:
+    """Extrae coordenadas del HTML de una página de Google Maps.
+
+    Google Maps embebe las coordenadas del pin en el HTML de la página en
+    varios formatos. Este método busca los patrones más confiables para
+    evitar confundir el centro de la vista con el pin real.
+    """
+    # Patrón 1: JSON-LD o metadatos con coordenadas explícitas
+    # Formato: "center":{"lat":4.7101,"lng":-74.0721}
+    match = re.search(
+        r'"center"\s*:\s*\{\s*"lat"\s*:\s*(-?\d{1,2}(?:\.\d+)?)\s*,\s*"lng"\s*:\s*(-?\d{1,3}(?:\.\d+)?)',
+        html_body,
+    )
+    if match:
+        coords = _valid_coordinates(match.group(1), match.group(2))
+        if coords:
+            return coords
+
+    # Patrón 2: APP_INITIALIZATION_STATE con coordenadas del pin
+    # Formato: [null,null,4.7101,-74.0721]
+    matches = re.findall(
+        r"\[null,null,(-?\d{1,2}\.\d{4,}),(-?\d{1,3}\.\d{4,})\]",
+        html_body,
+    )
+    for lat_str, lon_str in matches:
+        coords = _valid_coordinates(lat_str, lon_str)
+        if coords:
+            return coords
+
+    # Patrón 3: Coordenadas en formato de inicialización de mapa
+    # Formato: @4.7101,-74.0721,
+    match = re.search(
+        r"@(-?\d{1,2}\.\d{4,}),(-?\d{1,3}\.\d{4,}),",
+        html_body,
+    )
+    if match:
+        coords = _valid_coordinates(match.group(1), match.group(2))
+        if coords:
+            return coords
+
+    # Patrón 4: Coordenadas en meta tags o scripts
+    # Formato: "lat":4.7101,"lng":-74.0721
+    match = re.search(
+        r'"lat"\s*:\s*(-?\d{1,2}\.\d{4,})\s*,\s*"lng"\s*:\s*(-?\d{1,3}\.\d{4,})',
+        html_body,
+    )
+    if match:
+        coords = _valid_coordinates(match.group(1), match.group(2))
+        if coords:
+            return coords
+
+    # Patrón 5: Pares de coordenadas de alta precisión en el body
+    # Busca el primer par de coordenadas con al menos 4 decimales
+    # que esté en el rango de Colombia/Latinoamérica
+    matches = re.findall(
+        r"(-?\d{1,2}\.\d{5,}),(-?\d{1,3}\.\d{5,})",
+        html_body,
+    )
+    for lat_str, lon_str in matches:
+        coords = _valid_coordinates(lat_str, lon_str)
+        # Filtrar coordenadas fuera de Latinoamérica para evitar falsos positivos
+        if coords and -60 <= coords[0] <= 15 and -120 <= coords[1] <= -30:
+            return coords
+
+    return None
+
+
 @lru_cache(maxsize=2_000)
 def resolve_map_link(url: str) -> str:
-    """Sigue redirecciones sin descargar el cuerpo de la página de mapas.
-
-    ``stream=True`` es importante: Google puede conservar la conexión abierta
-    para cargar la interfaz completa, mientras que las cabeceras ya contienen
-    la URL final necesaria para analizar las coordenadas.
-    """
+    """Sigue redirecciones sin descargar el cuerpo de la página de mapas."""
     link = _clean_url(url)
     if not link or not _should_follow_redirects(link):
         return link
@@ -342,45 +394,125 @@ def resolve_map_link(url: str) -> str:
             response.close()
 
 
-@lru_cache(maxsize=4_000)
-def geocode_address(address: str, region_hint: str = "Colombia") -> tuple[float, float] | None:
-    """Geocodifica una dirección sólo si el enlace no expone coordenadas."""
-    normalized = (address or "").strip()
-    if not normalized:
+@lru_cache(maxsize=2_000)
+def _fetch_page_coordinates(url: str) -> tuple[float, float] | None:
+    """Descarga el HTML de una página de Google Maps y extrae coordenadas.
+
+    Se usa como último recurso cuando la URL final no contiene coordenadas
+    explícitas pero sí apunta a un lugar concreto (fichas con ``ftid`` o
+    enlaces ``/@/data=...``).
+    """
+    link = _clean_url(url)
+    if not link or "google" not in _hostname(link):
         return None
+    response = None
     try:
         response = requests.get(
-            "https://nominatim.openstreetmap.org/search",
-            params={"q": f"{normalized}, {region_hint}", "format": "json", "limit": 1},
+            link,
             headers={"User-Agent": USER_AGENT},
             timeout=REQUEST_TIMEOUT,
         )
         response.raise_for_status()
-        data = response.json()
-        if data:
-            return _valid_coordinates(data[0].get("lat"), data[0].get("lon"))
-    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
+        # Leer solo los primeros 50KB para no desperdiciar ancho de banda
+        body = response.text[:50_000]
+    except requests.RequestException:
         return None
+    finally:
+        if response is not None:
+            response.close()
+
+    return _extract_coords_from_html(body)
+
+
+@lru_cache(maxsize=4_000)
+def geocode_address(address: str, region_hint: str = "Colombia") -> tuple[float, float] | None:
+    """Geocodifica una dirección sólo si el enlace no expone coordenadas.
+
+    Intenta primero con la dirección completa. Si falla, prueba una versión
+    simplificada eliminando el número de puerta (formato ``#xx-yy``), que
+    Nominatim no siempre reconoce en Colombia.
+    """
+    normalized = (address or "").strip()
+    if not normalized:
+        return None
+
+    def _query(q: str) -> tuple[float, float] | None:
+        try:
+            response = requests.get(
+                "https://nominatim.openstreetmap.org/search",
+                params={"q": q, "format": "json", "limit": 1},
+                headers={"User-Agent": USER_AGENT},
+                timeout=REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if data:
+                return _valid_coordinates(data[0].get("lat"), data[0].get("lon"))
+        except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
+            pass
+        return None
+
+    # Intento 1: dirección completa
+    result = _query(f"{normalized}, {region_hint}")
+    if result:
+        return result
+
+    # Intento 2: eliminar el número de puerta colombiano (#xx-yy) y el
+    # nombre del establecimiento si la dirección empieza con uno.
+    # Ejemplo: "D1 - Ciudad La Salle, Cra. 10 #172b - 50, Bogotá"
+    #       -> "Cra. 10, Bogotá"
+    simplified = re.sub(r"\s*#[\w\s\-]+", "", normalized)  # quitar #xx-yy
+    simplified = re.sub(r"^[^,]+,\s*", "", simplified).strip()  # quitar nombre inicial
+    if simplified and simplified != normalized:
+        result = _query(f"{simplified}, {region_hint}")
+        if result:
+            return result
+
+    # Intento 3: solo la parte de la calle/carrera/avenida con la ciudad
+    street_match = re.search(
+        r"((?:Cl|Cra|Av|Calle|Carrera|Avenida|Diagonal|Transversal|Tv|Dg)\.?\s*[\d\w]+)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    city_match = re.search(
+        r",\s*([A-Zá-úÁ-ÚñÑ\s]+(?:,\s*[A-Zá-úÁ-ÚñÑ\s]+)?)\s*$",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if street_match and city_match:
+        street_city = f"{street_match.group(1).strip()}, {city_match.group(1).strip()}"
+        result = _query(f"{street_city}, {region_hint}")
+        if result:
+            return result
+
     return None
 
 
 def get_coordinates(maps_link: str, address: str = "") -> tuple[float | None, float | None, str]:
     """Devuelve ``(latitud, longitud, fuente)`` de un enlace o una dirección.
 
-    Primero se intenta analizar el enlace original, después su redirección. La
-    geocodificación por dirección queda como respaldo explícitamente etiquetado
-    para que no se confunda con una coordenada obtenida del enlace.
+    Estrategia en orden de prioridad:
+    1. Parseo directo de la URL original (coordenadas explícitas).
+    2. Caché de coordenadas auditadas.
+    3. Resolución de redirección + parseo de la URL final.
+    4. Consulta de ficha de Google Maps (``ftid``/``!1s``).
+    5. Descarga del HTML de la página y extracción de coordenadas.
+    6. Geocodificación de la dirección extraída del enlace.
+    7. Geocodificación de la dirección de respaldo de la hoja Excel.
     """
     link = _clean_url(maps_link)
 
+    # 1. Parseo directo
     direct = _parse_coords_from_text(link)
     if direct:
         return direct[0], direct[1], "Enlace de mapa: coordenadas explícitas"
 
+    # 2. Caché auditada
     cached = _cached_coordinates(link)
     if cached:
         return cached
 
+    # 3. Resolución de redirección
     final_link = link
     if link and _should_follow_redirects(link):
         final_link = resolve_map_link(link)
@@ -388,21 +520,25 @@ def get_coordinates(maps_link: str, address: str = "") -> tuple[float | None, fl
         if redirected:
             return redirected[0], redirected[1], "Enlace de mapa: redirección resuelta"
 
-    # Las fichas de Google pueden incluir sólo ftid/!1s. Se consulta la ficha
-    # pública y se acepta el resultado únicamente si coincide con ese ID.
+    # 4. Ficha de Google Maps por ftid
     google_place = google_place_coordinates(final_link)
     if google_place:
         return google_place[0], google_place[1], "Enlace de mapa: ficha de Google validada"
 
-    # Google suele entregar q=<dirección>&ftid=<identificador> en vez de
-    # coordenadas. La búsqueda viene del propio enlace y es más específica que
-    # una dirección opcional de la hoja, por lo que se prueba primero.
+    # 5. Descarga del HTML de la página (para fichas y enlaces /@/data=...)
+    if final_link and "google" in _hostname(final_link):
+        page_coords = _fetch_page_coordinates(final_link)
+        if page_coords:
+            return page_coords[0], page_coords[1], "Enlace de mapa: coordenadas extraídas del HTML"
+
+    # 6. Geocodificación por dirección del enlace
     link_address = _map_query_as_address(final_link)
     if link_address:
         coordinates = geocode_address(link_address)
         if coordinates:
             return coordinates[0], coordinates[1], "Dirección del enlace geocodificada"
 
+    # 7. Geocodificación por dirección de respaldo de la hoja
     if address and str(address).strip():
         coordinates = geocode_address(str(address))
         if coordinates:
@@ -437,6 +573,6 @@ def get_coordinates_batch(
             key = futures[future]
             try:
                 results[key] = future.result()
-            except Exception as exc:  # Evita que un enlace defectuoso detenga la carga completa.
+            except Exception as exc:
                 results[key] = (None, None, f"Error al interpretar enlace: {type(exc).__name__}")
     return results
