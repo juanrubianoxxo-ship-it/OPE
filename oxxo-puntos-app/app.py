@@ -3,6 +3,7 @@ import html
 
 import pandas as pd
 import folium
+from rapidfuzz import process, fuzz
 from streamlit_folium import st_folium
 
 from src.data_loader import load_tiendas, load_visitas, reload_all, DATE_COLUMN_STD
@@ -21,6 +22,58 @@ ASSETS_DIR = Path("oxxo-puntos-app/src")
 LOGO_PATH = ASSETS_DIR / "logo_oxxo_simil.png"
 ICONO_PATH = ASSETS_DIR / "icono_app.png"
 FONDO_PATH = ASSETS_DIR / "fondo_login.png"
+
+
+def _normalizar_nombre(valor):
+    if pd.isna(valor):
+        return ""
+    return " ".join(str(valor).strip().casefold().split())
+
+
+def _comparar_nombre_con_base(nombre, df, columna_nombre, etiqueta, threshold, id_actual=None):
+    if df is None or df.empty or columna_nombre not in df.columns:
+        return {"fuente": etiqueta, "nombre": "", "score": 0, "posible": False}
+    nombre_normalizado = _normalizar_nombre(nombre)
+    if not nombre_normalizado:
+        return {"fuente": etiqueta, "nombre": "", "score": 0, "posible": False}
+    candidatos = []
+    for indice, fila in df.iterrows():
+        if id_actual is not None and "ID" in df.columns and str(fila.get("ID", "")) == str(id_actual):
+            continue
+        nombre_candidato = _normalizar_nombre(fila.get(columna_nombre, ""))
+        if nombre_candidato:
+            candidatos.append((nombre_candidato, indice))
+    if not candidatos:
+        return {"fuente": etiqueta, "nombre": "", "score": 0, "posible": False}
+    mejor = process.extractOne(nombre_normalizado, [x[0] for x in candidatos], scorer=fuzz.WRatio)
+    if mejor is None:
+        return {"fuente": etiqueta, "nombre": "", "score": 0, "posible": False}
+    nombre_mejor, score, posicion = mejor
+    fila_mejor = df.loc[candidatos[posicion][1]]
+    return {"fuente": etiqueta, "nombre": str(fila_mejor.get(columna_nombre, nombre_mejor)), "score": int(round(score)), "posible": bool(score >= threshold)}
+
+
+def agregar_alertas_duplicados(match_df, operaciones_df, puntos_potenciales_df, threshold):
+    resultado = match_df.copy()
+    ops, pps, resumenes = [], [], []
+    for _, fila in resultado.iterrows():
+        op = _comparar_nombre_con_base(fila.get("Nombre del Punto", ""), operaciones_df, "Nombre del Punto", "Operaciones_ult_semana", threshold, fila.get("ID", ""))
+        pp = _comparar_nombre_con_base(fila.get("Nombre del Punto", ""), puntos_potenciales_df, "Nombre PP", "Puntos_Potenciales", threshold)
+        ops.append(op); pps.append(pp)
+        partes = []
+        if op["posible"]: partes.append(f"Operaciones_ult_semana: {op['nombre']} ({op['score']}%)")
+        if pp["posible"]: partes.append(f"Puntos_Potenciales: {pp['nombre']} ({pp['score']}%)")
+        resumenes.append(" | ".join(partes))
+    resultado["Duplicado Operaciones"] = [x["posible"] for x in ops]
+    resultado["Coincidencia Operaciones"] = [x["nombre"] for x in ops]
+    resultado["Score Operaciones"] = [x["score"] for x in ops]
+    resultado["Duplicado Puntos Potenciales"] = [x["posible"] for x in pps]
+    resultado["Coincidencia Puntos Potenciales"] = [x["nombre"] for x in pps]
+    resultado["Score Puntos Potenciales"] = [x["score"] for x in pps]
+    resultado["Tiene posibles duplicados"] = resultado["Posible duplicado"] | resultado["Duplicado Operaciones"] | resultado["Duplicado Puntos Potenciales"]
+    resultado["Detalle posibles duplicados"] = resumenes
+    return resultado
+
 
 page_icon_src = None
 if ICONO_PATH.exists():
@@ -276,6 +329,7 @@ if visitas.empty:
 
 match_table = build_match_table(visitas, tiendas, threshold=threshold, top_n=top_n)
 match_table["ID"] = match_table["ID"].astype(str)
+match_table = agregar_alertas_duplicados(match_table, visitas_full, puntos_potenciales, threshold)
 match_table["Subido"] = match_table["ID"].isin(subidos_ids)
 
 # ============================================================== PAGE 1 ====
@@ -291,28 +345,25 @@ if page == "🔍 Comparación de nombres":
             "están ocultos (activa la casilla en la barra lateral para verlos)."
         )
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Puntos evaluados", len(match_table))
-    c2.metric(
-        "Posibles duplicados",
-        int(match_table["Posible duplicado"].sum()),
-    )
-    c3.metric(
-        "Sin coincidencia relevante",
-        int((match_table["Score"] < threshold).sum()),
-    )
+    c2.metric("Posibles duplicados", int(match_table["Tiene posibles duplicados"].sum()))
+    c3.metric("Contra Operaciones", int(match_table["Duplicado Operaciones"].sum()))
+    c4.metric("Contra Puntos Potenciales", int(match_table["Duplicado Puntos Potenciales"].sum()))
 
     solo_alertas = st.checkbox("Mostrar solo posibles duplicados", value=False)
-    tabla = match_table[match_table["Posible duplicado"]] if solo_alertas else match_table
+    tabla = match_table[match_table["Tiene posibles duplicados"]] if solo_alertas else match_table
 
     def resaltar(row):
-        color = "background-color: #ffe1e1" if row["Posible duplicado"] else ""
+        color = "background-color: #ffe1e1" if row["Tiene posibles duplicados"] else ""
         return [color] * len(row)
 
     cols_mostrar = [
         "ID", "Nombre del Punto", "Jefe de zona", "Región", "Plaza",
         "Estado visita", "Mejor coincidencia", "Estado tienda", "Score",
-        "Posible duplicado", "Subido"
+        "Posible duplicado", "Coincidencia Operaciones", "Score Operaciones",
+        "Coincidencia Puntos Potenciales", "Score Puntos Potenciales",
+        "Tiene posibles duplicados", "Subido"
     ]
     st.dataframe(
         tabla[cols_mostrar].style.apply(resaltar, axis=1),
@@ -390,6 +441,19 @@ else:
             f"⚠️ Posible duplicado — coincide en un {fila_match['Score']}% "
             f"con **{fila_match['Mejor coincidencia']}** "
             f"({fila_match['Estado tienda']})."
+        )
+
+    if fila_match["Duplicado Operaciones"]:
+        st.warning(
+            f"⚠️ Posible duplicado de nombre en **Operaciones_ult_semana**: "
+            f"coincide en un {fila_match['Score Operaciones']}% con "
+            f"**{fila_match['Coincidencia Operaciones']}**."
+        )
+    if fila_match["Duplicado Puntos Potenciales"]:
+        st.warning(
+            f"⚠️ Posible duplicado de nombre en **Puntos_Potenciales**: "
+            f"coincide en un {fila_match['Score Puntos Potenciales']}% con "
+            f"**{fila_match['Coincidencia Puntos Potenciales']}**."
         )
 
     # -------------------------------------------- Nombre nuevo propuesto --
