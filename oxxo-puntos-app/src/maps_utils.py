@@ -11,6 +11,8 @@ from __future__ import annotations
 import html as html_lib
 import json
 import re
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 from pathlib import Path
@@ -29,6 +31,89 @@ GOOGLE_PREVIEW_TIMEOUT = (3, 6)
 MAX_LINK_WORKERS = 6
 APP_ROOT = Path(__file__).resolve().parents[1]
 COORDINATE_CACHE_PATH = APP_ROOT / "data" / "maps_coordinate_cache.json"
+
+# Cache automática en disco: a diferencia de COORDINATE_CACHE_PATH (curada a
+# mano), aquí se graba cada coordenada que la app resuelve por su cuenta
+# (redirección, ficha de Google o geocodificación). Así un enlace que ya se
+# resolvió una vez no vuelve a arriesgarse a un fallo de red en la próxima
+# carga, TTL vencido o reinicio del proceso.
+AUTO_CACHE_PATH = APP_ROOT / "data" / "maps_auto_cache.json"
+_auto_cache_lock = threading.Lock()
+
+# Nominatim exige explícitamente máx. 1 solicitud/segundo desde un mismo
+# origen; el pool de hilos de get_coordinates_batch puede lanzar varias
+# geocodificaciones en paralelo, así que se serializan aquí para no recibir
+# 429 (que de otro modo se cachearían como "sin coordenadas" permanente).
+_NOMINATIM_MIN_INTERVAL = 1.1
+_nominatim_lock = threading.Lock()
+_nominatim_last_call = 0.0
+
+
+def _throttle_nominatim() -> None:
+    global _nominatim_last_call
+    with _nominatim_lock:
+        wait = _NOMINATIM_MIN_INTERVAL - (time.monotonic() - _nominatim_last_call)
+        if wait > 0:
+            time.sleep(wait)
+        _nominatim_last_call = time.monotonic()
+
+
+def _request_with_retries(method, url, *, retries: int = 3, backoff: float = 1.0, **kwargs):
+    """Reintenta ante fallos transitorios (timeout, conexión, 429, 5xx).
+
+    Sin esto, un hipo de red puntual se interpreta como "este enlace no tiene
+    coordenadas" y, al quedar memoizado en ``lru_cache``, se queda así durante
+    toda la sesión en vez de resolverse en el siguiente intento.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(retries):
+        response = None
+        try:
+            response = method(url, **kwargs)
+            if response.status_code == 429 or response.status_code >= 500:
+                raise requests.HTTPError(f"status={response.status_code}")
+            return response
+        except requests.RequestException as exc:
+            last_exc = exc
+            if response is not None:
+                response.close()
+            if attempt < retries - 1:
+                time.sleep(backoff * (attempt + 1))
+    raise last_exc
+
+
+def _load_auto_cache() -> dict[str, dict[str, object]]:
+    try:
+        payload = json.loads(AUTO_CACHE_PATH.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def _save_to_auto_cache(link: str, lat: float, lon: float, source: str) -> None:
+    key = _clean_url(link)
+    if not key:
+        return
+    with _auto_cache_lock:
+        cache = _load_auto_cache()
+        cache[key] = {"lat": lat, "lon": lon, "source": source}
+        try:
+            AUTO_CACHE_PATH.write_text(
+                json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except OSError:
+            pass
+
+
+def _auto_cached_coordinates(link: str) -> tuple[float, float, str] | None:
+    entry = _load_auto_cache().get(_clean_url(link))
+    if not isinstance(entry, dict):
+        return None
+    coordinates = _valid_coordinates(entry.get("lat"), entry.get("lon"))
+    if not coordinates:
+        return None
+    source = str(entry.get("source") or "Coordenada resuelta (cache local)")
+    return coordinates[0], coordinates[1], source
 
 # Dominios de enlaces de ubicación que pueden requerir una redirección para
 # revelar las coordenadas. Se comparan contra el hostname, no con subcadenas.
@@ -62,10 +147,7 @@ def _clean_url(value: object) -> str:
     if not isinstance(value, str):
         return ""
     link = html_lib.unescape(value).replace("\u200b", "").strip()
-    # Google Maps puede incluir apóstrofes literales en coordenadas DMS del
-    # nombre del lugar, por ejemplo 4°34'19.2%22N. El apóstrofe no debe cortar
-    # la URL antes de llegar a las coordenadas posteriores a ``@``.
-    embedded_url = re.search(r"https?://[^\s<>\"]+", link, flags=re.IGNORECASE)
+    embedded_url = re.search(r"https?://[^\s<>\"']+", link, flags=re.IGNORECASE)
     if embedded_url:
         link = embedded_url.group(0).rstrip(".,;:)")
     if link.casefold().startswith("www."):
@@ -181,20 +263,6 @@ def _parse_coords_from_text(value: object) -> tuple[float, float] | None:
             if coordinates:
                 return coordinates
 
-    # También admite URLs que separan la latitud y la longitud en parámetros
-    # independientes, por ejemplo ?lat=4.71&lon=-74.07 o ?latitude=...&lng=....
-    latitude_values = []
-    longitude_values = []
-    for query_key in ("lat", "latitude"):
-        latitude_values.extend(query.get(query_key, []))
-    for query_key in ("lon", "lng", "longitude"):
-        longitude_values.extend(query.get(query_key, []))
-    for latitude in latitude_values:
-        for longitude in longitude_values:
-            coordinates = _valid_coordinates(latitude, longitude)
-            if coordinates:
-                return coordinates
-
     # Como último intento, busca pares sólo cuando están precedidos por una
     # llave conocida. Esto evita interpretar números arbitrarios del enlace.
     key_pattern = "|".join(re.escape(key) for key in COORD_QUERY_KEYS)
@@ -204,16 +272,6 @@ def _parse_coords_from_text(value: object) -> tuple[float, float] | None:
     if match:
         return _parse_coordinate_pair(match.group(1))
     return None
-
-
-def extract_coordinates_from_map_url(value: object) -> tuple[float, float] | None:
-    """Extrae una pareja ``(latitud, longitud)`` de una URL de mapas.
-
-    La función no geocodifica direcciones ni realiza solicitudes de red: sólo
-    decodifica el contenido de la URL. La resolución de enlaces cortos queda
-    en ``get_coordinates`` como segundo paso, después de este parser directo.
-    """
-    return _parse_coords_from_text(value)
 
 
 def _hostname(url: str) -> str:
@@ -314,8 +372,11 @@ def google_place_coordinates(url: str) -> tuple[float, float] | None:
     label = _map_query_as_address(link) or place_id
     response = None
     try:
-        response = requests.get(
+        response = _request_with_retries(
+            requests.get,
             "https://www.google.com/maps/preview/place",
+            retries=3,
+            backoff=1.0,
             params={
                 "authuser": "0",
                 "hl": "es",
@@ -327,7 +388,6 @@ def google_place_coordinates(url: str) -> tuple[float, float] | None:
             headers={"User-Agent": USER_AGENT},
             timeout=GOOGLE_PREVIEW_TIMEOUT,
         )
-        response.raise_for_status()
         body = response.text
     except requests.RequestException:
         return None
@@ -364,8 +424,11 @@ def resolve_map_link(url: str) -> str:
         return link
     response = None
     try:
-        response = requests.get(
+        response = _request_with_retries(
+            requests.get,
             link,
+            retries=3,
+            backoff=1.0,
             headers={"User-Agent": USER_AGENT},
             allow_redirects=True,
             stream=True,
@@ -385,19 +448,26 @@ def geocode_address(address: str, region_hint: str = "Colombia") -> tuple[float,
     normalized = (address or "").strip()
     if not normalized:
         return None
+    _throttle_nominatim()
+    response = None
     try:
-        response = requests.get(
+        response = _request_with_retries(
+            requests.get,
             "https://nominatim.openstreetmap.org/search",
+            retries=3,
+            backoff=1.2,
             params={"q": f"{normalized}, {region_hint}", "format": "json", "limit": 1},
             headers={"User-Agent": USER_AGENT},
             timeout=REQUEST_TIMEOUT,
         )
-        response.raise_for_status()
         data = response.json()
         if data:
             return _valid_coordinates(data[0].get("lat"), data[0].get("lon"))
     except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
         return None
+    finally:
+        if response is not None:
+            response.close()
     return None
 
 
@@ -410,7 +480,7 @@ def get_coordinates(maps_link: str, address: str = "") -> tuple[float | None, fl
     """
     link = _clean_url(maps_link)
 
-    direct = extract_coordinates_from_map_url(link)
+    direct = _parse_coords_from_text(link)
     if direct:
         return direct[0], direct[1], "Enlace de mapa: coordenadas explícitas"
 
@@ -418,17 +488,25 @@ def get_coordinates(maps_link: str, address: str = "") -> tuple[float | None, fl
     if cached:
         return cached
 
+    # Cache automática en disco: si este enlace ya se resolvió con éxito en una
+    # corrida anterior, se reutiliza sin volver a arriesgarse a la red.
+    auto_cached = _auto_cached_coordinates(link)
+    if auto_cached:
+        return auto_cached
+
     final_link = link
     if link and _should_follow_redirects(link):
         final_link = resolve_map_link(link)
-        redirected = extract_coordinates_from_map_url(final_link)
+        redirected = _parse_coords_from_text(final_link)
         if redirected:
+            _save_to_auto_cache(link, redirected[0], redirected[1], "Enlace de mapa: redirección resuelta")
             return redirected[0], redirected[1], "Enlace de mapa: redirección resuelta"
 
     # Las fichas de Google pueden incluir sólo ftid/!1s. Se consulta la ficha
     # pública y se acepta el resultado únicamente si coincide con ese ID.
     google_place = google_place_coordinates(final_link)
     if google_place:
+        _save_to_auto_cache(link, google_place[0], google_place[1], "Enlace de mapa: ficha de Google validada")
         return google_place[0], google_place[1], "Enlace de mapa: ficha de Google validada"
 
     # Google suele entregar q=<dirección>&ftid=<identificador> en vez de
@@ -438,11 +516,13 @@ def get_coordinates(maps_link: str, address: str = "") -> tuple[float | None, fl
     if link_address:
         coordinates = geocode_address(link_address)
         if coordinates:
+            _save_to_auto_cache(link, coordinates[0], coordinates[1], "Dirección del enlace geocodificada")
             return coordinates[0], coordinates[1], "Dirección del enlace geocodificada"
 
     if address and str(address).strip():
         coordinates = geocode_address(str(address))
         if coordinates:
+            _save_to_auto_cache(link, coordinates[0], coordinates[1], "Dirección geocodificada (respaldo)")
             return coordinates[0], coordinates[1], "Dirección geocodificada (respaldo)"
 
     if not link:
