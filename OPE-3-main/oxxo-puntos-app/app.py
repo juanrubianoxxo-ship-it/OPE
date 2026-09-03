@@ -999,7 +999,7 @@ else:
     st.divider()
     st.subheader("📄 Informe del punto")
     jefes_operaciones = [
-        "PEDRO MORENO SUAREZ",
+        "ERNESTO LATORRE",
         "JUAN QUIROGA",
         "DIEGO RODRIGUEZ ESTEBAN",
         "YESENIA ARIZTIZABAL ALZATE",
